@@ -2,6 +2,8 @@
 
 Small DPM component that adds a `dpm trace` command for Canton transaction/update inspection.
 
+<img width="3464" height="2003" alt="screenshot" src="https://github.com/user-attachments/assets/bbeab898-ea54-49c1-b6cb-f73b8be2774b" />
+
 This is a POC for three flows:
 
 - `trace`: inspect an already committed update.
