@@ -1,4 +1,4 @@
-# dpm trace POC
+# dpm trace
 
 Small DPM component that adds a `dpm trace` command for Canton transaction/update inspection.
 
