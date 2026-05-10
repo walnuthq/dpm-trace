@@ -1,6 +1,6 @@
 # dpm trace
 
-Small DPM component that adds a `dpm trace` command for Canton transaction/update inspection.
+DPM component that adds a `dpm trace` command for Canton transaction/update inspection.
 
 <img width="3446" height="2003" alt="screenshot (1)" src="https://github.com/user-attachments/assets/cec97a79-8fd0-4f06-8f70-3b7d37873697" />
 
