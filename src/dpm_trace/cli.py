@@ -2680,11 +2680,16 @@ class Stepper:
             ev = self.trace.events_by_id.get(event_id)
             if not ev:
                 return
-            cursor = "=>" if event_id == current_event_id else "  "
+            is_current = event_id == current_event_id
+            cursor = self.color.apply("=>", "magenta", "bold") if is_current else "  "
             indent = "  " * depth
             target = short_template(ev.template) or ev.template or ""
             label = f"{target}.{ev.choice}" if ev.choice and target else (ev.choice or target)
-            print(f"{indent}{cursor} {ev.kind.upper():<8} {ev.event_id} {label}")
+            kind = f"{ev.kind.upper():<8}"
+            if is_current:
+                kind = self.color.apply(kind, event_color(ev.kind), "bold")
+                label = self.color.apply(label, "bold")
+            print(f"{indent}{cursor} {kind} {ev.event_id} {label}")
             for child in ev.child_event_ids:
                 visit(child, depth + 1)
 
