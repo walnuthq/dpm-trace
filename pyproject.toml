@@ -1,7 +1,7 @@
 [project]
 name = "dpm-trace"
 version = "0.1.0"
-description = "CLI-only POC for participant-scoped Canton transaction tracing and interactive stepping."
+description = "POC for participant-scoped Canton transaction visualization and comparison."
 requires-python = ">=3.10"
 dependencies = []
 

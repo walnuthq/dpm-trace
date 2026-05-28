@@ -2,9 +2,6 @@
   "ledgerUrl": "http://localhost:6113",
   "readAs": "Alice::1220...",
   "darPaths": [
-    "/Users/djtodorovic/projects/crypto/CANTON/daml-examples/daml-3x/.daml/dist/counter-example-1.0.0.dar"
-  ],
-  "debugInfoPaths": [
-    "/path/to/counter-example-1.0.0.debug-info.json"
+    "./path/to/app.dar"
   ]
 }

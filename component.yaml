@@ -4,4 +4,4 @@ spec:
   commands:
     - name: trace
       path: bin/dpm-trace
-      desc: Inspect Canton transactions and open an interactive trace debugger
+      desc: Visualize and compare Canton transactions

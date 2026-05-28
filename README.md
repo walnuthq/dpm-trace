@@ -1,19 +1,17 @@
 # dpm trace
 
-DPM component that adds a `dpm trace` command for Canton transaction/update inspection.
+DPM component POC for participant-scoped Canton transaction visualization.
 
-<img width="3446" height="2003" alt="screenshot (1)" src="https://github.com/user-attachments/assets/cec97a79-8fd0-4f06-8f70-3b7d37873697" />
-
-This is a POC for three flows:
+It demonstrates the proposal surface:
 
 - `trace`: inspect an already committed update.
-- `simulate`: re-simulate a committed update without submitting anything.
-- `bundle` / `replay --interactive`: capture participant-visible replay context and open an interactive debugger.
+- `open`: reopen an exported trace artifact.
+- `prepare`: prepare a command without committing it.
+- `compare`: compare prepared results, committed updates, or captured completions.
 
 ## Setup
 
 ```bash
-cd dpm-trace
 .venv/bin/python -m pip install -e .
 ./scripts/install-local-dpm-trace.sh
 ```
@@ -30,15 +28,8 @@ Example config:
 {
   "ledgerUrl": "http://localhost:<json-ledger-api-port>",
   "readAs": "<party-id>",
-  "darPaths": ["./path/to/app.dar"],
-  "debugInfoPaths": ["./path/to/app.debug-info.json"]
+  "darPaths": ["./path/to/app.dar"]
 }
-```
-
-Run commands through the local DPM home:
-
-```bash
-dpm trace --help
 ```
 
 ## Trace
@@ -53,109 +44,88 @@ With explicit participant context:
 
 ```bash
 dpm trace <update-id> \
-  --ledger-url http://localhost:<json-ledger-api-port> \
-  --read-as '<party-id>'
+  --participant-url http://localhost:<json-ledger-api-port> \
+  --read-as '<party-id>' \
+  --access-token-file ./token.txt
 ```
 
-Useful options:
+Export a trace artifact:
 
 ```bash
---interactive              open event-by-event trace inspector
---print-json               print normalized trace JSON
---debug-info FILE          attach source/debug metadata
---dar FILE                 attach local DAR metadata
---color always|never|auto  control ANSI colors
+dpm trace <update-id> --export trace.json
 ```
 
-Examples:
+Open the interactive transaction visualizer:
 
 ```bash
-dpm trace <update-id> --interactive
-
-dpm trace <update-id> \
-  --debug-info ./path/to/app.debug-info.json
+dpm trace <update-id> --visualize
 ```
 
-## Simulate
+## Open
 
-Run a non-committing prepare call from a committed update:
+Reopen an exported trace artifact:
 
 ```bash
-dpm trace simulate <update-id>
+dpm trace open trace.json
+dpm trace open trace.json --visualize
 ```
 
-Override reconstructed command arguments:
+## Prepare
+
+Prepare a command without committing it:
 
 ```bash
-dpm trace simulate <update-id> \
-  --override amount=1000
-```
-
-Explicit command preparation is also supported:
-
-```bash
-dpm trace simulate \
-  --ledger-url http://localhost:<json-ledger-api-port> \
+dpm trace prepare \
+  --participant-url http://localhost:<json-ledger-api-port> \
   --act-as '<party-id>' \
   --template '<package-id>:Counter:Counter' \
   --arg owner='<party-id>' \
-  --arg count=0
+  --arg count=0 \
+  --export prepared.json
 ```
 
-`simulate` calls Canton’s non-committing prepare API. It does not submit to the ledger.
-
-## Interactive Debugger
-
-Capture replay/debug context:
+Or pass a command file:
 
 ```bash
-dpm trace bundle <update-id> \
-  --out ./counter.bundle.json
+dpm trace prepare \
+  --participant-url http://localhost:<json-ledger-api-port> \
+  --act-as '<party-id>' \
+  --commands commands.json \
+  --export prepared.json
 ```
 
-Replay the bundle:
+`prepare` calls Canton's non-committing prepare API. It does not submit to the ledger.
+
+## Compare
+
+Compare a prepared command with a committed update:
 
 ```bash
-dpm trace replay ./counter.bundle.json
+dpm trace compare \
+  --prepared prepared.json \
+  --update <update-id> \
+  --participant-url http://localhost:<json-ledger-api-port> \
+  --read-as '<party-id>'
 ```
 
-Open the interactive debugger:
+Compare two committed updates:
 
 ```bash
-dpm trace replay ./counter.bundle.json \
-  --interactive \
-  --debug-info ./path/to/app.debug-info.json
+dpm trace compare <update-id-a> <update-id-b> \
+  --participant-url http://localhost:<json-ledger-api-port> \
+  --read-as '<party-id>'
 ```
 
-Useful REPL commands:
+Compare a prepared command with a captured completion JSON:
 
-```text
-n / next     next event
-p / prev     previous event
-s / source   show source snippet
-expr         list source expression steps
-si           step into source expression
-vars         show visible variables
-b <spec>     set breakpoint: event id, template.choice, or file:line
-bp           list breakpoints
-c            continue to next breakpoint
-tree         show transaction tree
-json         print current event JSON
-q            quit
-```
-
-Breakpoint examples:
-
-```text
-b Counter:Counter.Increment
-b Counter.daml:15
-b 0
-c
+```bash
+dpm trace compare \
+  --prepared prepared.json \
+  --completion-file completion.json
 ```
 
 ## Notes
 
 - Output is participant-scoped. It is not a global Canton transaction.
-- Source-line support requires matching debug-info metadata.
-- `trace --interactive` steps through committed transaction events.
-- `replay --interactive` can inspect captured replay context such as ACS/pre-state and input contracts.
+- Failed submissions may not have an update id. In that case comparison uses completion/error data and optional logs.
+- Source-level debugging and compiler debug-info generation are out of scope for this PoC.

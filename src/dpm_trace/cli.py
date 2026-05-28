@@ -8,7 +8,6 @@ import sys
 import textwrap
 import urllib.error
 import urllib.request
-from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +19,9 @@ SCAN_UPDATE_PATH = "/v2/updates/{update_id}"
 LEDGER_UPDATE_BY_ID_PATH = "/v2/updates/update-by-id"
 LEDGER_ACTIVE_CONTRACTS_PATH = "/v2/state/active-contracts"
 LEDGER_INTERACTIVE_PREPARE_PATH = "/v2/interactive-submission/prepare"
-BUNDLE_SCHEMA = "dpm-trace/replay-bundle/v0"
+LEDGER_COMPLETIONS_PATH = "/v2/commands/completions"
+TRACE_ARTIFACT_SCHEMA = "dpm-trace/trace-artifact/v0"
+PREPARED_ARTIFACT_SCHEMA = "dpm-trace/prepared-artifact/v0"
 
 
 @dataclass
@@ -82,12 +83,12 @@ class ExpressionStep:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == "bundle":
-        return bundle_main(argv[1:])
-    if argv and argv[0] == "replay":
-        return replay_main(argv[1:])
-    if argv and argv[0] == "simulate":
-        return simulate_main(argv[1:])
+    if argv and argv[0] == "open":
+        return open_main(argv[1:])
+    if argv and argv[0] == "prepare":
+        return prepare_main(argv[1:])
+    if argv and argv[0] == "compare":
+        return compare_main(argv[1:])
 
     parser = build_trace_parser()
     args = parser.parse_args(argv)
@@ -97,32 +98,34 @@ def main(argv: list[str] | None = None) -> int:
 def build_trace_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dpm trace",
-        description="POC for participant-scoped Canton transaction tracing and interactive stepping.",
+        description="POC for participant-scoped Canton transaction visualization.",
         epilog=(
             "Subcommands: "
-            "dpm trace bundle <update-id>, "
-            "dpm trace replay <bundle>, "
-            "dpm trace simulate <update-id>."
+            "dpm trace open <trace.json>, "
+            "dpm trace prepare --commands commands.json, "
+            "dpm trace compare <update-a> <update-b>."
         ),
     )
     parser.add_argument("target", nargs="?", help="Update id or CantonScan update URL.")
-    parser.add_argument("--interactive", action="store_true", help="Open the terminal stepper.")
+    parser.add_argument("--visualize", action="store_true", help="Open the interactive transaction visualizer.")
     add_common_connection_args(parser)
+    parser.add_argument("--export", "--out", dest="export", help="Write a portable trace artifact JSON file.")
     parser.add_argument("--print-json", action="store_true", help="Print normalized trace JSON and exit.")
     parser.add_argument("--explain-apis", action="store_true", help="Explain Scan API vs Ledger API.")
-    parser.add_argument("--explain-replay", action="store_true", help="Explain what local replay needs.")
     return parser
 
 
 def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--scan-url", help="Scan API base URL, e.g. https://.../api/scan.")
     parser.add_argument("--ledger-url", help="Ledger JSON API base URL, e.g. http://localhost:7575.")
+    parser.add_argument("--participant-url", dest="ledger_url", help="Alias for --ledger-url.")
     parser.add_argument("--token-file", help="Bearer token file for Ledger JSON API.")
+    parser.add_argument("--access-token-file", dest="token_file", help="Alias for --token-file.")
     parser.add_argument("--token", help="Bearer token for Ledger JSON API.")
     parser.add_argument("--read-as", action="append", default=[], help="Party to read as. Repeatable.")
     parser.add_argument("--party", action="append", default=[], help="Alias for --read-as.")
-    parser.add_argument("--dar", action="append", default=[], help="Local DAR to attach as package/debug metadata. Repeatable.")
-    parser.add_argument("--debug-info", action="append", default=[], help="Daml debug-info JSON sidecar. Repeatable.")
+    parser.add_argument("--dar", action="append", default=[], help="Local DAR to attach as package metadata. Repeatable.")
+    parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument(
         "--config",
         help="Trace config JSON. Defaults to .dpm-trace.json found in the current directory or a parent.",
@@ -136,77 +139,68 @@ def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", choices=["auto", "scan", "ledger"], default="auto")
 
 
-def bundle_main(argv: list[str]) -> int:
+def open_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="dpm trace bundle",
-        description="Create a participant-scoped replay/debug bundle for a committed update.",
+        prog="dpm trace open",
+        description="Open an exported dpm trace artifact.",
     )
-    parser.add_argument("target", help="Update id or CantonScan update URL.")
-    parser.add_argument("--out", help="Output bundle path. Defaults to trace-<update-id>.bundle.json.")
-    parser.add_argument("--active-at-offset", help="Override ACS snapshot offset.")
-    parser.add_argument("--no-acs", action="store_true", help="Do not try to capture an ACS snapshot.")
-    parser.add_argument("--include-raw", action="store_true", help="Include the raw update response in the bundle.")
-    add_common_connection_args(parser)
-    args = parser.parse_args(argv)
-    return run_bundle(args)
-
-
-def replay_main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="dpm trace replay",
-        description="Open a replay/debug bundle.",
-    )
-    parser.add_argument("bundle", help="Path to a dpm trace replay bundle.")
-    parser.add_argument("--interactive", action="store_true", help="Step through the bundled trace.")
-    parser.add_argument("--debug-info", action="append", default=[], help="Daml debug-info JSON sidecar. Repeatable.")
-    parser.add_argument("--print-json", action="store_true", help="Print the bundle JSON and exit.")
+    parser.add_argument("artifact", help="Path to an exported trace artifact JSON file.")
+    parser.add_argument("--visualize", action="store_true", help="Open the interactive transaction visualizer.")
+    parser.add_argument("--print-json", action="store_true", help="Print the artifact JSON and exit.")
     parser.add_argument("--color", choices=["auto", "always", "never"], default="auto")
+    parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    return run_replay(args)
+    return run_open(args)
 
 
-def simulate_main(argv: list[str]) -> int:
+def prepare_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="dpm trace simulate",
-        description="Re-simulate a committed update, or prepare an explicit command, without committing.",
+        prog="dpm trace prepare",
+        description="Prepare and visualize a non-committed Canton command result.",
     )
-    parser.add_argument("target", nargs="?", help="Committed update id or CantonScan update URL.")
     add_common_connection_args(parser)
-    parser.add_argument("--active-at-offset", help="Override ACS snapshot offset when target is an update id.")
-    parser.add_argument("--no-acs", action="store_true", help="Do not capture/attach an ACS snapshot when target is an update id.")
-    parser.add_argument("--act-as", action="append", default=[], help="Submitting party for simulation. Repeatable.")
+    parser.add_argument("--commands", help="JSON file containing a commands array or an object with a commands field.")
+    parser.add_argument("--command-json", help="Raw JSON command envelope or commands array.")
+    parser.add_argument("--act-as", action="append", default=[], help="Submitting party. Repeatable.")
     parser.add_argument("--template", help="Template id for an explicit command.")
     parser.add_argument("--choice", help="Choice name for an explicit exercise command.")
     parser.add_argument("--contract-id", help="Contract id for an explicit exercise command.")
     parser.add_argument("--args-json", help="JSON object/value to use as create arguments or choice argument.")
     parser.add_argument("--args-file", help="File containing JSON arguments.")
     parser.add_argument("--arg", action="append", default=[], help="Set one argument field, e.g. --arg count=1. Repeatable.")
-    parser.add_argument(
-        "--override",
-        action="append",
-        default=[],
-        help="Override a reconstructed command argument field, e.g. --override amount=1000 or --override choiceArgument.amount=1000. Repeatable.",
-    )
-    parser.add_argument("--command-json", help="Raw JSON command envelope or commands array for PrepareSubmission.")
-    parser.add_argument("--command-id", help="Command id. Defaults to dpm-trace-simulate-<uuid>.")
-    parser.add_argument(
-        "--no-disclosed-contracts",
-        action="store_true",
-        help="Do not attach disclosed contracts extracted from replay-context ACS snapshots.",
-    )
-    parser.add_argument(
-        "--user-id",
-        help="Ledger API user id for PrepareSubmission. Defaults to participant_admin when no bearer token is supplied.",
-    )
-    parser.add_argument("--out", help="Write the raw PrepareSubmission response to this path.")
-    parser.add_argument("--print-json", action="store_true", help="Print the raw PrepareSubmission request and response.")
-    explicit_ledger_url = has_cli_option(argv, "--ledger-url")
-    explicit_read_as = has_cli_option(argv, "--read-as", "--party")
+    parser.add_argument("--command-id", help="Command id. Defaults to dpm-trace-prepare-<uuid>.")
+    parser.add_argument("--user-id", help="Ledger API user id for PrepareSubmission.")
+    parser.add_argument("--synchronizer-id", default="", help="Optional synchronizer id.")
+    parser.add_argument("--export", "--out", dest="export", help="Write a prepared command artifact JSON file.")
+    parser.add_argument("--print-json", action="store_true", help="Print the raw request and response.")
     args = parser.parse_args(argv)
-    args._explicit_ledger_url = explicit_ledger_url
-    args._explicit_read_as = explicit_read_as
     try:
-        return run_simulate(args)
+        return run_prepare(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def compare_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm trace compare",
+        description="Compare prepared commands, committed updates, or completion/error artifacts.",
+    )
+    parser.add_argument("updates", nargs="*", help="Two update ids to compare.")
+    parser.add_argument("--prepared", help="Prepared command artifact produced by dpm trace prepare.")
+    parser.add_argument("--update", help="Committed update id to compare against --prepared.")
+    parser.add_argument("--completion", help="Command id for a failed/successful completion.")
+    parser.add_argument("--completion-file", help="JSON file containing a completion response/artifact.")
+    parser.add_argument("--completion-user-id", help="Ledger API user id for completion lookup.")
+    parser.add_argument("--begin-exclusive", default="0", help="Minimum completion offset to query from. Defaults to 0.")
+    parser.add_argument("--completion-limit", type=int, default=100, help="Maximum completions to scan. Defaults to 100.")
+    parser.add_argument("--completion-timeout-ms", type=int, default=1000, help="Completion query idle timeout. Defaults to 1000.")
+    parser.add_argument("--log-file", action="append", default=[], help="Operator/application log file to attach and correlate. Repeatable.")
+    add_common_connection_args(parser)
+    parser.add_argument("--print-json", action="store_true", help="Print machine-readable comparison JSON.")
+    args = parser.parse_args(argv)
+    try:
+        return run_compare(args)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -224,20 +218,11 @@ def run_trace(args: argparse.Namespace) -> int:
         if not args.target:
             return 0
 
-    if args.explain_replay:
-        print(explain_replay())
-        if not args.target:
-            return 0
-
     try:
-        bundle = maybe_load_bundle_target(args.target)
-        if bundle is not None:
-            trace = trace_from_json(bundle["trace"])
-        else:
-            update_id = extract_update_id(args.target)
-            parties = parse_parties(args.read_as + args.party)
-            raw, source, source_url = load_update(args, update_id, parties)
-            trace = normalize_trace(raw, source=source, source_url=source_url, parties=parties)
+        update_id = extract_update_id(args.target)
+        parties = parse_parties(args.read_as + args.party)
+        raw, source, source_url = load_update(args, update_id, parties)
+        trace = normalize_trace(raw, source=source, source_url=source_url, parties=parties)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -246,178 +231,941 @@ def run_trace(args: argparse.Namespace) -> int:
         print(json.dumps(trace_to_json(trace), indent=2, sort_keys=True))
         return 0
 
-    if args.interactive:
+    if getattr(args, "export", None):
+        artifact = create_trace_artifact(args, trace)
+        out_path = Path(args.export)
+        out_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"wrote trace artifact: {out_path}")
+
+    if getattr(args, "visualize", False):
         Stepper(
             trace,
-            bundle=bundle if bundle is not None else None,
-            source_index=source_index_from_args(args, bundle),
+            bundle=None,
+            source_index=source_index_from_args(args, None),
             color=Color.from_mode(args.color),
         ).run()
         return 0
 
-    print_pretty_trace(trace, color=Color.from_mode(args.color), source_index=source_index_from_args(args, bundle))
+    print_pretty_trace(trace, color=Color.from_mode(args.color), source_index=source_index_from_args(args, None))
     return 0
 
 
-def run_bundle(args: argparse.Namespace) -> int:
+def run_open(args: argparse.Namespace) -> int:
     try:
-        apply_config_defaults(args, load_config(args.config))
-    except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    update_id = extract_update_id(args.target)
-    parties = parse_parties(args.read_as + args.party)
-    try:
-        raw, source, source_url = load_update(args, update_id, parties)
-        trace = normalize_trace(raw, source=source, source_url=source_url, parties=parties)
-        bundle = create_bundle(args, trace, raw if args.include_raw else None)
-        out_path = Path(args.out) if args.out else default_bundle_path(trace.update_id)
-        out_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    print(f"wrote replay bundle: {out_path}")
-    print(bundle_summary(bundle))
-    return 0
-
-
-def run_replay(args: argparse.Namespace) -> int:
-    try:
-        apply_config_defaults(args, load_config(None))
-        bundle = load_bundle(Path(args.bundle))
-        trace = trace_from_json(bundle["trace"])
+        artifact = load_trace_artifact(Path(args.artifact))
+        trace = trace_from_artifact(artifact)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.print_json:
-        print(json.dumps(bundle, indent=2, sort_keys=True))
+        print(json.dumps(artifact, indent=2, sort_keys=True))
         return 0
 
-    print(bundle_summary(bundle))
-    if args.interactive:
-        Stepper(trace, bundle=bundle, source_index=source_index_from_args(args, bundle), color=Color.from_mode(args.color)).run()
+    print(trace_artifact_summary(artifact))
+    if args.visualize:
+        Stepper(trace, bundle=artifact, source_index=source_index_from_args(args, artifact), color=Color.from_mode(args.color)).run()
         return 0
-    print_pretty_trace(trace, color=Color.from_mode(args.color), source_index=source_index_from_args(args, bundle))
+    print_pretty_trace(trace, color=Color.from_mode(args.color), source_index=source_index_from_args(args, artifact))
     return 0
 
 
-def run_simulate(args: argparse.Namespace) -> int:
+def run_prepare(args: argparse.Namespace) -> int:
     apply_config_defaults(args, load_config(args.config))
-    bundle = load_or_create_simulation_bundle(args)
-    apply_bundle_defaults(args, bundle)
-
-    if bundle is None and not args.command_json and not args.template:
-        raise ValueError("simulation needs an update id, --command-json, or --template")
-
-    request = prepare_submission_request(args, bundle)
-    ledger_url = simulation_ledger_url(args, bundle)
+    commands = prepare_commands(args)
+    act_as = parse_parties(args.act_as)
+    if not act_as:
+        raise ValueError("--act-as is required")
+    read_as = [party for party in parse_parties(args.read_as + args.party) if party not in act_as]
+    ledger_url = participant_ledger_url(args)
     token = args.token or read_token_file(args.token_file)
-    url = join_url(ledger_url, LEDGER_INTERACTIVE_PREPARE_PATH)
-    response = http_json("POST", url, body=request, token=token)
-
-    if args.out:
-        out_path = Path(args.out)
-        out_path.write_text(json.dumps(response, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(f"wrote simulation response: {out_path}")
-
-    if args.print_json:
-        print(json.dumps({"request": request, "response": response}, indent=2, sort_keys=True))
-        return 0
-
-    print(simulation_success_report(request, response, url, bundle))
-    return 0
-
-
-def load_or_create_simulation_bundle(args: argparse.Namespace) -> dict[str, Any] | None:
-    target = getattr(args, "target", None)
-    if not target:
-        return None
-
-    existing = Path(target)
-    if existing.exists() and existing.is_file():
-        raise ValueError(
-            "dpm trace simulate no longer accepts replay bundle paths. "
-            "Use `dpm trace replay <bundle>` to inspect a saved bundle, or `dpm trace simulate <update-id>` to re-simulate a committed update."
-        )
-
-    update_id = extract_update_id(target)
-    parties = parse_parties(args.read_as + args.party)
-    update_args = args
-    if getattr(args, "source", "auto") == "auto" and getattr(args, "ledger_url", None):
-        update_args = argparse.Namespace(**vars(args))
-        update_args.source = "ledger"
-    raw, source, source_url = load_update(update_args, update_id, parties)
-    trace = normalize_trace(raw, source=source, source_url=source_url, parties=parties)
-    return create_bundle(update_args, trace, raw_update=None)
-
-
-def apply_bundle_defaults(args: argparse.Namespace, bundle: dict[str, Any] | None) -> None:
-    if bundle is None:
-        return
-    participant = bundle.get("participant") or {}
-    if not getattr(args, "_explicit_ledger_url", False) and participant.get("ledgerUrl"):
-        args.ledger_url = participant["ledgerUrl"]
-    if not getattr(args, "_explicit_read_as", False) and participant.get("readAs"):
-        args.read_as = []
-        args.party = []
-
-
-def prepare_submission_request(args: argparse.Namespace, bundle: dict[str, Any] | None) -> dict[str, Any]:
-    command_id = args.command_id or f"dpm-trace-simulate-{uuid4().hex[:12]}"
-    commands = apply_simulation_overrides(simulation_commands(args, bundle), args.override)
-    act_as = simulation_act_as(args, bundle)
-    read_as = [party for party in simulation_read_as(args, bundle) if party not in act_as]
-    package_ids = simulation_package_ids(bundle)
-    synchronizer_id = simulation_synchronizer_id(bundle)
-    disclosed_contracts = [] if args.no_disclosed_contracts else disclosed_contracts_from_bundle(bundle)
-
-    request: dict[str, Any] = {
-        "commandId": command_id,
+    request = {
+        "commandId": args.command_id or f"dpm-trace-prepare-{uuid4().hex[:12]}",
         "commands": commands,
         "actAs": act_as,
         "readAs": read_as,
-        "disclosedContracts": disclosed_contracts,
-        "synchronizerId": synchronizer_id or "",
-        "packageIdSelectionPreference": package_ids,
+        "disclosedContracts": [],
+        "synchronizerId": args.synchronizer_id or "",
+        "packageIdSelectionPreference": [],
         "verboseHashing": True,
     }
-    user_id = simulation_user_id(args)
+    user_id = prepare_user_id(args)
     if user_id:
         request["userId"] = user_id
-    return request
+
+    url = join_url(ledger_url, LEDGER_INTERACTIVE_PREPARE_PATH)
+    response = http_json("POST", url, body=request, token=token)
+    artifact = create_prepared_artifact(args, request, response, url)
+
+    if args.export:
+        out_path = Path(args.export)
+        out_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"wrote prepared artifact: {out_path}")
+
+    if args.print_json:
+        print(json.dumps(artifact, indent=2, sort_keys=True))
+        return 0
+
+    print(prepared_artifact_summary(artifact))
+    return 0
 
 
-def simulation_commands(args: argparse.Namespace, bundle: dict[str, Any] | None) -> list[dict[str, Any]]:
+def run_compare(args: argparse.Namespace) -> int:
+    apply_config_defaults(args, load_config(args.config))
+    color = Color.from_mode(args.color)
+    if args.prepared:
+        prepared = load_prepared_artifact(Path(args.prepared))
+        if args.update:
+            trace = fetch_trace_for_compare(args, args.update)
+            comparison = compare_prepared_to_trace(prepared, trace)
+        elif args.completion or args.completion_file:
+            completion = load_completion_for_compare(args)
+            comparison = compare_prepared_to_completion(prepared, completion)
+        else:
+            raise ValueError("--prepared needs --update, --completion, or --completion-file")
+    elif len(args.updates) == 2:
+        left = fetch_trace_for_compare(args, args.updates[0])
+        right = fetch_trace_for_compare(args, args.updates[1])
+        comparison = compare_traces(left, right)
+    else:
+        raise ValueError("usage: dpm trace compare <update-a> <update-b> or --prepared prepared.json --update <update-id>")
+
+    if args.print_json:
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+        return 0
+    print_comparison(comparison, color)
+    return 0
+
+
+def prepare_commands(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.commands and args.command_json:
+        raise ValueError("use only one of --commands or --command-json")
+    if args.commands:
+        raw = parse_json_text(Path(args.commands).read_text(encoding="utf-8"), args.commands)
+        return normalize_commands_json(raw)
     if args.command_json:
-        raw = parse_json_text(args.command_json, "--command-json")
-        if isinstance(raw, dict) and isinstance(raw.get("commands"), list):
-            return raw["commands"]
-        if isinstance(raw, list):
-            return raw
-        if isinstance(raw, dict):
-            return [raw]
-        raise ValueError("--command-json must be a JSON object or array")
-
+        return normalize_commands_json(parse_json_text(args.command_json, "--command-json"))
     if args.template:
         return [explicit_js_command(args)]
+    raise ValueError("prepare needs --commands, --command-json, or --template")
 
-    command_context = (bundle or {}).get("command") or {}
-    if not command_context.get("available"):
-        reason = command_context.get("reason") or "bundle has no inferred command"
-        raise ValueError(
-            f"{reason}. Provide an explicit command with --template/--args-json or --command-json."
-        )
-    commands = command_context.get("commands")
-    if not isinstance(commands, list) or not commands:
-        raise ValueError("bundle command context is malformed: commands must be a non-empty array")
-    return [bundle_command_to_js_command(command) for command in commands if isinstance(command, dict)]
+
+def normalize_commands_json(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, dict) and isinstance(raw.get("commands"), list):
+        return raw["commands"]
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return [raw]
+    raise ValueError("commands JSON must be an object, an array, or an object with a commands field")
+
+
+def create_trace_artifact(args: argparse.Namespace, trace: NormalizedTrace) -> dict[str, Any]:
+    package_ids = sorted({
+        package
+        for ev in trace.events_by_id.values()
+        for package in [package_from_template(ev.template)]
+        if package
+    })
+    return {
+        "schema": TRACE_ARTIFACT_SCHEMA,
+        "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "kind": "committed-update",
+        "trace": trace_to_json(trace),
+        "participant": {
+            "ledgerUrl": getattr(args, "ledger_url", None),
+            "scanUrl": getattr(args, "scan_url", None),
+            "readAs": trace.projection.get("readAs") or [],
+        },
+        "packages": package_metadata_context(getattr(args, "dar", []), getattr(args, "debug_info", []), package_ids),
+        "privacy": {
+            "scope": trace.projection.get("note"),
+            "readAs": trace.projection.get("readAs") or [],
+            "missingPrivateDataPolicy": "private data outside this participant projection is not present in the artifact",
+        },
+    }
+
+
+def create_prepared_artifact(
+    args: argparse.Namespace,
+    request: dict[str, Any],
+    response: Any,
+    source_url: str,
+) -> dict[str, Any]:
+    return {
+        "schema": PREPARED_ARTIFACT_SCHEMA,
+        "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "kind": "prepared-command",
+        "source": "ledger-json-api",
+        "sourceUrl": source_url,
+        "participant": {
+            "ledgerUrl": getattr(args, "ledger_url", None),
+            "actAs": request.get("actAs") or [],
+            "readAs": request.get("readAs") or [],
+        },
+        "committed": False,
+        "request": request,
+        "response": response,
+        "privacy": {
+            "scope": "Prepared command result from an authorized participant endpoint.",
+            "missingPrivateDataPolicy": "counterparty-private data outside this authorization context is not present in the artifact",
+        },
+    }
+
+
+def load_trace_artifact(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"trace artifact must be a JSON object: {path}")
+    schema = data.get("schema")
+    if schema != TRACE_ARTIFACT_SCHEMA:
+        raise ValueError(f"unsupported trace artifact schema in {path}: {schema!r}")
+    if not isinstance(data.get("trace"), dict):
+        raise ValueError(f"trace artifact is missing trace object: {path}")
+    return data
+
+
+def load_prepared_artifact(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"prepared artifact must be a JSON object: {path}")
+    if data.get("schema") != PREPARED_ARTIFACT_SCHEMA:
+        raise ValueError(f"unsupported prepared artifact schema in {path}: {data.get('schema')!r}")
+    return data
+
+
+def trace_from_artifact(artifact: dict[str, Any]) -> NormalizedTrace:
+    return trace_from_json(artifact["trace"])
+
+
+def trace_artifact_summary(artifact: dict[str, Any]) -> str:
+    trace = artifact.get("trace") or {}
+    participant = artifact.get("participant") or {}
+    events = trace.get("eventsById") if isinstance(trace.get("eventsById"), dict) else {}
+    return "\n".join(
+        [
+            "Trace artifact",
+            f"  schema:       {artifact.get('schema')}",
+            f"  update:       {trace.get('updateId', '-')}",
+            f"  kind:         {artifact.get('kind', '-')}",
+            f"  source:       {trace.get('source', '-')}",
+            f"  read-as:      {', '.join(list_str(participant.get('readAs') or [])) or '-'}",
+            f"  events:       {len(events)}",
+        ]
+    )
+
+
+def prepared_artifact_summary(artifact: dict[str, Any]) -> str:
+    request = artifact.get("request") or {}
+    response = artifact.get("response") or {}
+    lines = [
+        "Prepared command",
+        f"  schema:       {artifact.get('schema')}",
+        f"  endpoint:     {artifact.get('sourceUrl', '-')}",
+        "  committed:    no",
+        f"  command id:   {request.get('commandId', '-')}",
+        f"  act-as:       {', '.join(list_str(request.get('actAs') or [])) or '-'}",
+        f"  read-as:      {', '.join(list_str(request.get('readAs') or [])) or '-'}",
+        f"  commands:     {len(request.get('commands') or [])}",
+    ]
+    if isinstance(response, dict):
+        tx_hash = response.get("preparedTransactionHash")
+        if tx_hash:
+            lines.append(f"  prepared hash:{short(str(tx_hash), 80)}")
+        if response.get("costEstimation") is not None:
+            lines.append("  cost:         returned")
+    lines.append("")
+    lines.append("This is prepared transaction data from a non-committing prepare call.")
+    return "\n".join(lines)
+
+
+def fetch_trace_for_compare(args: argparse.Namespace, target: str) -> NormalizedTrace:
+    path = Path(target)
+    if path.exists() and path.is_file():
+        return trace_from_artifact(load_trace_artifact(path))
+    update_id = extract_update_id(target)
+    parties = parse_parties(args.read_as + args.party)
+    raw, source, source_url = load_update(args, update_id, parties)
+    return normalize_trace(raw, source=source, source_url=source_url, parties=parties)
+
+
+def load_completion_for_compare(args: argparse.Namespace) -> dict[str, Any]:
+    if args.completion_file:
+        data = json.loads(Path(args.completion_file).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("--completion-file must contain a JSON object")
+        return attach_log_matches(args, normalize_completion(data))
+    if args.completion:
+        path = Path(args.completion)
+        if path.exists() and path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("--completion file must contain a JSON object")
+            return attach_log_matches(args, normalize_completion(data))
+        return attach_log_matches(args, fetch_completion_by_command_id(args, args.completion))
+    raise ValueError("provide --completion or --completion-file")
+
+
+def fetch_completion_by_command_id(args: argparse.Namespace, command_id: str) -> dict[str, Any]:
+    apply_config_defaults(args, load_config(args.config))
+    ledger_url = participant_ledger_url(args)
+    parties = parse_parties(args.read_as + args.party)
+    if not parties:
+        raise ValueError("--read-as/--party is required for completion lookup")
+    token = args.token or read_token_file(args.token_file)
+    body: dict[str, Any] = {"parties": parties}
+    if args.completion_user_id:
+        body["userId"] = args.completion_user_id
+    elif not token:
+        body["userId"] = prepare_user_id(args)
+    try:
+        body["beginExclusive"] = int(args.begin_exclusive)
+    except ValueError as exc:
+        raise ValueError("--begin-exclusive must be an integer offset") from exc
+
+    url = join_url(ledger_url, LEDGER_COMPLETIONS_PATH)
+    query = f"?limit={max(args.completion_limit, 1)}&stream_idle_timeout_ms={max(args.completion_timeout_ms, 1)}"
+    raw = http_json("POST", url + query, body=body, token=token)
+    completions = normalize_completion_list(raw)
+    for completion in completions:
+        if str(completion.get("commandId") or "") == command_id:
+            completion["source"] = "ledger-json-api"
+            completion["sourceUrl"] = url
+            completion["lookup"] = {
+                "commandId": command_id,
+                "parties": parties,
+                "beginExclusive": body.get("beginExclusive"),
+                "limit": args.completion_limit,
+            }
+            return completion
+    raise ValueError(
+        f"completion {command_id!r} not found in the queried completion window; "
+        "try --begin-exclusive with an earlier offset or --completion-file with captured JSON"
+    )
+
+
+def normalize_completion_list(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, dict):
+        candidates = raw.get("completions") or raw.get("items") or raw.get("responses") or raw.get("completionResponses")
+        if candidates is None:
+            candidates = [raw]
+    else:
+        candidates = raw
+    if not isinstance(candidates, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in candidates:
+        completion = normalize_completion(item)
+        if completion:
+            result.append(completion)
+    return result
+
+
+def normalize_completion(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    completion = raw
+    for key in ("completionResponse", "Completion", "completion", "value"):
+        value = completion.get(key)
+        if isinstance(value, dict):
+            completion = value
+    if "Completion" in completion and isinstance(completion["Completion"], dict):
+        return normalize_completion(completion["Completion"])
+    if "Empty" in completion or "OffsetCheckpoint" in completion:
+        return {}
+    if not isinstance(completion, dict):
+        return {}
+    return completion
+
+
+def attach_log_matches(args: argparse.Namespace, completion: dict[str, Any]) -> dict[str, Any]:
+    if not getattr(args, "log_file", None):
+        return completion
+    terms = completion_correlation_terms(completion)
+    matches: list[dict[str, Any]] = []
+    for raw_path in args.log_file:
+        path = Path(raw_path)
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            matches.append({"file": str(path), "error": str(exc)})
+            continue
+        for line_no, line in enumerate(lines, start=1):
+            if any(term and term in line for term in terms):
+                matches.append({"file": str(path), "line": line_no, "text": line[:500]})
+    completion = dict(completion)
+    completion["logMatches"] = matches
+    completion["logMatchTerms"] = sorted(terms)
+    return completion
+
+
+def completion_correlation_terms(completion: dict[str, Any]) -> set[str]:
+    terms: set[str] = set()
+    for key in ("commandId", "command_id", "updateId", "update_id", "submissionId", "submission_id", "traceId", "correlationId"):
+        value = completion.get(key)
+        if value:
+            terms.add(str(value))
+    status = completion.get("status")
+    if isinstance(status, dict):
+        for key in ("traceId", "correlationId"):
+            value = status.get(key)
+            if value:
+                terms.add(str(value))
+    trace_context = completion.get("traceContext")
+    if isinstance(trace_context, dict):
+        for value in trace_context.values():
+            if value:
+                terms.add(str(value))
+    return {term for term in terms if len(term) >= 6}
+
+
+def compare_prepared_to_trace(prepared: dict[str, Any], trace: NormalizedTrace) -> dict[str, Any]:
+    request = prepared.get("request") or {}
+    commands = request.get("commands") if isinstance(request.get("commands"), list) else []
+    roots = [trace.events_by_id[event_id] for event_id in trace.root_event_ids if event_id in trace.events_by_id]
+    return {
+        "kind": "prepared-vs-update",
+        "left": prepared_summary_for_compare(prepared),
+        "right": trace_summary_for_compare(trace),
+        "diff": {
+            "commandCount": {"prepared": len(commands), "updateRootEvents": len(roots)},
+            "rootEvents": [event_compare_row(ev) for ev in roots],
+            "commands": [command_compare_row(command) for command in commands if isinstance(command, dict)],
+            "stateDiff": state_diff_counts(trace),
+            "notes": [
+                "Prepared data is not committed.",
+                "The comparison checks visible command/event shape; it is not proof of semantic equivalence.",
+            ],
+        },
+    }
+
+
+def compare_prepared_to_completion(prepared: dict[str, Any], completion: dict[str, Any]) -> dict[str, Any]:
+    code, message = completion_status_fields(completion)
+    return {
+        "kind": "prepared-vs-completion",
+        "left": prepared_summary_for_compare(prepared),
+        "right": {
+            "commandId": pick(completion, "commandId", "command_id"),
+            "updateId": pick(completion, "updateId", "update_id"),
+            "offset": pick(completion, "offset"),
+            "submissionId": pick(completion, "submissionId", "submission_id"),
+            "statusCode": code,
+            "message": message,
+            "source": completion.get("source"),
+            "logMatches": completion.get("logMatches") or [],
+        },
+        "diff": {
+            "committedUpdateAvailable": bool(pick(completion, "updateId", "update_id")),
+            "logMatches": completion.get("logMatches") or [],
+        },
+    }
+
+
+def completion_status_fields(completion: dict[str, Any]) -> tuple[Any, Any]:
+    status = pick(completion, "status", "completionStatus")
+    if isinstance(status, dict):
+        code = pick(status, "code", "grpcCode", "grpcCodeValue")
+        message = pick(status, "message", "details")
+        if code is not None or message is not None:
+            return code, message
+    elif status:
+        return None, status
+
+    code = pick(completion, "code", "grpcCode", "grpcCodeValue", "errorCategory")
+    message = pick(completion, "message", "details", "cause")
+    if code is not None or message is not None:
+        return code, message
+    if pick(completion, "updateId", "update_id"):
+        return "OK", "committed"
+    return None, None
+
+
+def compare_traces(left: NormalizedTrace, right: NormalizedTrace) -> dict[str, Any]:
+    return {
+        "kind": "update-vs-update",
+        "left": trace_summary_for_compare(left),
+        "right": trace_summary_for_compare(right),
+        "diff": {
+            "eventCounts": {"left": state_diff_counts(left), "right": state_diff_counts(right)},
+            "rootEvents": {
+                "left": [event_compare_row(left.events_by_id[event_id]) for event_id in left.root_event_ids if event_id in left.events_by_id],
+                "right": [event_compare_row(right.events_by_id[event_id]) for event_id in right.root_event_ids if event_id in right.events_by_id],
+            },
+            "templatesOnlyInLeft": sorted(event_templates(left) - event_templates(right)),
+            "templatesOnlyInRight": sorted(event_templates(right) - event_templates(left)),
+        },
+    }
+
+
+def trace_summary_for_compare(trace: NormalizedTrace) -> dict[str, Any]:
+    return {
+        "updateId": trace.update_id,
+        "source": trace.source,
+        "offset": trace.offset,
+        "recordTime": trace.record_time,
+        "readAs": trace.projection.get("readAs") or [],
+        "events": len(trace.events_by_id),
+    }
+
+
+def prepared_summary_for_compare(prepared: dict[str, Any]) -> dict[str, Any]:
+    request = prepared.get("request") or {}
+    response = prepared.get("response") or {}
+    return {
+        "commandId": request.get("commandId"),
+        "actAs": request.get("actAs") or [],
+        "readAs": request.get("readAs") or [],
+        "commands": len(request.get("commands") or []),
+        "preparedTransactionHash": response.get("preparedTransactionHash") if isinstance(response, dict) else None,
+        "committed": False,
+    }
+
+
+def event_compare_row(ev: TraceEvent) -> dict[str, Any]:
+    value = None
+    value_label = None
+    if ev.kind == "create":
+        value = ev.payload
+        value_label = "payload"
+    elif ev.kind == "exercise":
+        value = ev.argument
+        value_label = "argument"
+    return {
+        "eventId": ev.event_id,
+        "kind": ev.kind,
+        "template": ev.template,
+        "choice": ev.choice,
+        "contractId": short(ev.contract_id, 48),
+        "value": value,
+        "valueLabel": value_label,
+    }
+
+
+def command_compare_row(command: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(command.get("CreateCommand"), dict):
+        body = command["CreateCommand"]
+        return {
+            "kind": "create",
+            "template": body.get("templateId"),
+            "value": body.get("createArguments"),
+            "valueLabel": "arguments",
+        }
+    if isinstance(command.get("ExerciseCommand"), dict):
+        body = command["ExerciseCommand"]
+        return {
+            "kind": "exercise",
+            "template": body.get("templateId"),
+            "choice": body.get("choice"),
+            "contractId": short(body.get("contractId"), 48),
+            "value": body.get("choiceArgument"),
+            "valueLabel": "choice argument",
+        }
+    return {"kind": "unknown", "keys": sorted(command.keys())}
+
+
+def state_diff_counts(trace: NormalizedTrace) -> dict[str, int]:
+    counts = {"create": 0, "exercise": 0, "archive": 0, "other": 0}
+    for ev in trace.events_by_id.values():
+        if ev.kind in counts:
+            counts[ev.kind] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def event_templates(trace: NormalizedTrace) -> set[str]:
+    return {ev.template for ev in trace.events_by_id.values() if ev.template}
+
+
+def print_comparison(comparison: dict[str, Any], color: Color) -> None:
+    kind = comparison.get("kind")
+    if kind == "update-vs-update":
+        print_update_comparison(comparison, color)
+        return
+    if kind == "prepared-vs-update":
+        print_prepared_update_comparison(comparison, color)
+        return
+    if kind == "prepared-vs-completion":
+        print_prepared_completion_comparison(comparison, color)
+        return
+
+    print(color.apply("DPM trace comparison", "bold"))
+    print(f"  kind: {kind}")
+    print("")
+    print(color.apply("Left", "cyan", "bold"))
+    print(indent_json(comparison.get("left") or {}))
+    print(color.apply("Right", "cyan", "bold"))
+    print(indent_json(comparison.get("right") or {}))
+    print(color.apply("Diff", "cyan", "bold"))
+    print(indent_json(comparison.get("diff") or {}))
+
+
+def print_update_comparison(comparison: dict[str, Any], color: Color) -> None:
+    left = comparison.get("left") or {}
+    right = comparison.get("right") or {}
+    diff = comparison.get("diff") or {}
+    counts = diff.get("eventCounts") or {}
+    left_counts = counts.get("left") or {}
+    right_counts = counts.get("right") or {}
+    root_events = diff.get("rootEvents") or {}
+    left_roots = root_events.get("left") or []
+    right_roots = root_events.get("right") or []
+    templates_left = diff.get("templatesOnlyInLeft") or []
+    templates_right = diff.get("templatesOnlyInRight") or []
+    left_root_keys = [event_exact_key(row) for row in left_roots if isinstance(row, dict)]
+    right_root_keys = [event_exact_key(row) for row in right_roots if isinstance(row, dict)]
+    has_differences = (
+        left_counts != right_counts
+        or left_root_keys != right_root_keys
+        or bool(templates_left)
+        or bool(templates_right)
+    )
+
+    print(color.apply("DPM trace comparison", "bold"))
+    print("  kind:   update-vs-update")
+    print(f"  result: {comparison_result(has_differences, color)}")
+    print("")
+
+    print(color.apply("Updates", "cyan", "bold"))
+    print(f"  baseline:  {trace_compare_summary(left)}")
+    print(f"  candidate: {trace_compare_summary(right)}")
+    print("")
+
+    print(color.apply("Event counts", "cyan", "bold"))
+    print_count_diff(left_counts, right_counts, color)
+    print("")
+
+    print(color.apply("Root events", "cyan", "bold"))
+    print_event_diff(left_roots, right_roots, color)
+    if templates_left or templates_right:
+        print("")
+        print(color.apply("Template differences", "cyan", "bold"))
+        print_template_list("only in baseline", templates_left)
+        print_template_list("only in candidate", templates_right)
+
+
+def print_prepared_update_comparison(comparison: dict[str, Any], color: Color) -> None:
+    prepared = comparison.get("left") or {}
+    update = comparison.get("right") or {}
+    diff = comparison.get("diff") or {}
+    commands = diff.get("commands") or []
+    roots = diff.get("rootEvents") or []
+    command_rows = [row for row in commands if isinstance(row, dict)]
+    root_rows = [row for row in roots if isinstance(row, dict)]
+    first_command = command_rows[0] if command_rows else None
+    first_root = root_rows[0] if root_rows else None
+    has_differences = prepared_update_has_differences(command_rows, root_rows)
+
+    print(color.apply("DPM trace comparison", "bold"))
+    print("  kind:   prepared-vs-update")
+    print(f"  result: {comparison_result(has_differences, color)}")
+    print("")
+
+    print(color.apply("Operation", "cyan", "bold"))
+    print(f"  prepared:  {command_row_text(first_command) if first_command else '-'}")
+    print(f"  committed: {event_row_text(first_root) if first_root else '-'}")
+    print(f"  shape:     {operation_shape_summary(first_command, first_root, color)}")
+    print("")
+
+    print(color.apply("Field diff", "cyan", "bold"))
+    print_prepared_value_summary(first_command, first_root, color)
+    print("")
+
+    print(color.apply("Context", "cyan", "bold"))
+    print(f"  command id: {prepared.get('commandId') or '-'}")
+    if prepared.get("preparedTransactionHash"):
+        print(f"  prep hash:  {short(str(prepared.get('preparedTransactionHash')), 80)}")
+    print(f"  update:     {short(str(update.get('updateId') or '-'), 80)}")
+    print(f"  offset:     {update.get('offset') or '-'}")
+    print(f"  act-as:     {party_list_summary(prepared.get('actAs') or [])}")
+    print(f"  read-as:    {party_list_summary(update.get('readAs') or [])}")
+    print("")
+
+    print(color.apply("Committed state diff", "cyan", "bold"))
+    print_count_diff(diff.get("stateDiff") or {}, None, color)
+
+
+def print_prepared_completion_comparison(comparison: dict[str, Any], color: Color) -> None:
+    prepared = comparison.get("left") or {}
+    completion = comparison.get("right") or {}
+    diff = comparison.get("diff") or {}
+    status_code = completion.get("statusCode")
+    committed = bool(diff.get("committedUpdateAvailable"))
+    failed = status_code not in (None, "OK", 0, "0") and not committed
+
+    print(color.apply("DPM trace comparison", "bold"))
+    print("  kind:   prepared-vs-completion")
+    print(f"  result: {completion_result(committed, failed, color)}")
+    print("")
+    print(color.apply("Prepared command", "cyan", "bold"))
+    print(f"  command id: {prepared.get('commandId') or '-'}")
+    print(f"  commands:   {prepared.get('commands', 0)}")
+    print("")
+
+    print(color.apply("Completion", "cyan", "bold"))
+    print(f"  command id: {completion.get('commandId') or '-'}")
+    print(f"  submission: {completion.get('submissionId') or '-'}")
+    print(f"  update id:  {short(str(completion.get('updateId') or '-'), 80)}")
+    print(f"  offset:     {completion.get('offset') or '-'}")
+    print(f"  status:     {status_code if status_code is not None else '-'}")
+    print(f"  message:    {completion.get('message') or '-'}")
+    log_matches = diff.get("logMatches") or []
+    if log_matches:
+        print("")
+        print(color.apply("Log matches", "cyan", "bold"))
+        for match in log_matches[:8]:
+            if "error" in match:
+                print(f"  {match.get('file')}: {match['error']}")
+            else:
+                print(f"  {match.get('file')}:{match.get('line')}: {match.get('text')}")
+        if len(log_matches) > 8:
+            print(f"  ... {len(log_matches) - 8} more")
+
+
+def comparison_result(has_differences: bool, color: Color) -> str:
+    if has_differences:
+        return color.apply("visible differences found", "yellow", "bold")
+    return color.apply("no visible differences", "green", "bold")
+
+
+def completion_result(committed: bool, failed: bool, color: Color) -> str:
+    if committed:
+        return color.apply("completion committed", "green", "bold")
+    if failed:
+        return color.apply("completion failed", "red", "bold")
+    return color.apply("completion status available", "yellow", "bold")
+
+
+def trace_compare_summary(summary: dict[str, Any]) -> str:
+    pieces = [short(str(summary.get("updateId") or "-"), 36)]
+    if summary.get("offset"):
+        pieces.append(f"offset {summary['offset']}")
+    pieces.append(f"{summary.get('events', 0)} events")
+    read_as = list_str(summary.get("readAs") or [])
+    if read_as:
+        pieces.append("read-as " + ", ".join(short_party(party) for party in read_as))
+    return ", ".join(pieces)
+
+
+def party_list_summary(value: Any) -> str:
+    parties = list_str(value)
+    if not parties:
+        return "-"
+    return ", ".join(short_party(party) for party in parties)
+
+
+def print_count_diff(left: dict[str, Any], right: dict[str, Any] | None, color: Color) -> None:
+    for key in ("create", "exercise", "archive", "other"):
+        left_value = int(left.get(key) or 0)
+        if right is None:
+            print(f"  {key:<8} {left_value}")
+            continue
+        right_value = int(right.get(key) or 0)
+        marker = count_marker(left_value, right_value, color)
+        print(f"  {key:<8} {left_value:>3} -> {right_value:<3} {marker}")
+
+
+def count_marker(left: int, right: int, color: Color) -> str:
+    if left == right:
+        return color.apply("same", "green")
+    delta = right - left
+    sign = "+" if delta > 0 else ""
+    return color.apply(f"{sign}{delta}", "yellow")
+
+
+def print_event_diff(left_rows: list[Any], right_rows: list[Any], color: Color) -> None:
+    left = [row for row in left_rows if isinstance(row, dict)]
+    right = [row for row in right_rows if isinstance(row, dict)]
+    if not left and not right:
+        print("  no root events")
+        return
+    for index in range(max(len(left), len(right))):
+        left_row = left[index] if index < len(left) else None
+        right_row = right[index] if index < len(right) else None
+        if left_row and right_row and event_exact_key(left_row) == event_exact_key(right_row):
+            print(f"  [{index}] {event_row_text(left_row):<72} {color.apply('same', 'green')}")
+        elif left_row and right_row and event_compare_key(left_row) == event_compare_key(right_row):
+            print(f"  [{index}] {event_row_text(left_row):<72} {color.apply('same shape', 'yellow')}")
+        elif left_row and right_row:
+            print(f"  [{index}] baseline:  {event_row_text(left_row)}")
+            print(f"      candidate: {event_row_text(right_row)}")
+        elif left_row:
+            print(f"  [{index}] baseline only:  {event_row_text(left_row)}")
+        elif right_row:
+            print(f"  [{index}] candidate only: {event_row_text(right_row)}")
+
+
+def print_command_event_diff(commands: list[Any], roots: list[Any], color: Color) -> None:
+    command_rows = [row for row in commands if isinstance(row, dict)]
+    root_rows = [row for row in roots if isinstance(row, dict)]
+    if not command_rows and not root_rows:
+        print("  no commands or root events")
+        return
+    for index in range(max(len(command_rows), len(root_rows))):
+        command = command_rows[index] if index < len(command_rows) else None
+        root = root_rows[index] if index < len(root_rows) else None
+        if command and root and command_event_key(command) == event_compare_key(root):
+            print(f"  [{index}] {command_row_text(command):<72} {color.apply('matches root event shape', 'green')}")
+            print_value_diff(command, root, color)
+        else:
+            if command:
+                print(f"  [{index}] command: {command_row_text(command)}")
+            if root:
+                print(f"      root:    {event_row_text(root)}")
+
+
+def prepared_update_has_differences(commands: list[dict[str, Any]], roots: list[dict[str, Any]]) -> bool:
+    if len(commands) != len(roots):
+        return True
+    for command, root in zip(commands, roots):
+        if command_event_key(command) != event_compare_key(root):
+            return True
+        if comparable_value(command.get("value")) != comparable_value(root.get("value")):
+            return True
+    return False
+
+
+def operation_shape_summary(command: dict[str, Any] | None, root: dict[str, Any] | None, color: Color) -> str:
+    if command is None or root is None:
+        return color.apply("different", "yellow")
+    if command_event_key(command) == event_compare_key(root):
+        return color.apply("matches", "green")
+    return color.apply("different", "yellow")
+
+
+def print_prepared_value_summary(command: dict[str, Any] | None, root: dict[str, Any] | None, color: Color) -> None:
+    if command is None or root is None:
+        print("  unavailable")
+        return
+    prepared_value = command.get("value")
+    committed_value = root.get("value")
+    if comparable_value(prepared_value) == comparable_value(committed_value):
+        print(f"  values: {color.apply('match', 'green')}")
+        return
+    for line in prepared_committed_field_diffs(prepared_value, committed_value):
+        print(f"  {color.apply(line, 'yellow')}")
+
+
+def prepared_committed_field_diffs(prepared: Any, committed: Any) -> list[str]:
+    if not isinstance(prepared, dict) or not isinstance(committed, dict):
+        return [f"committed {compact_value(committed)}, prepared {compact_value(prepared)}"]
+    keys = sorted(set(prepared) | set(committed))
+    lines: list[str] = []
+    for key in keys:
+        prepared_value = prepared.get(key, "<missing>")
+        committed_value = committed.get(key, "<missing>")
+        if comparable_value(prepared_value) != comparable_value(committed_value):
+            lines.append(f"{key}: committed {compact_value(committed_value)}, prepared {compact_value(prepared_value)}")
+    return lines or ["values differ"]
+
+
+def print_template_list(label: str, templates: list[Any]) -> None:
+    if not templates:
+        print(f"  {label}: -")
+        return
+    print(f"  {label}:")
+    for template in templates:
+        print(f"    - {short_template(str(template)) or template}")
+
+
+def event_compare_key(row: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return (row.get("kind"), short_template(row.get("template")), row.get("choice"))
+
+
+def event_exact_key(row: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
+    return (*event_compare_key(row), row.get("contractId"))
+
+
+def command_event_key(row: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return (row.get("kind"), short_template(row.get("template")), row.get("choice"))
+
+
+def event_row_text(row: dict[str, Any]) -> str:
+    label = event_kind_label(str(row.get("kind") or "event"))
+    template = short_template(row.get("template")) or "-"
+    choice = row.get("choice")
+    if choice:
+        template = f"{template}.{choice}"
+    contract = row.get("contractId")
+    suffix = f" ({contract})" if contract else ""
+    return f"{label} {template}{suffix}"
+
+
+def command_row_text(row: dict[str, Any]) -> str:
+    label = event_kind_label(str(row.get("kind") or "command"))
+    template = short_template(row.get("template")) or "-"
+    choice = row.get("choice")
+    if choice:
+        template = f"{template}.{choice}"
+    contract = row.get("contractId")
+    suffix = f" ({contract})" if contract else ""
+    return f"{label} {template}{suffix}"
+
+
+def event_kind_label(kind: str) -> str:
+    return {
+        "create": "CREATE",
+        "exercise": "EXERCISE",
+        "archive": "ARCHIVE",
+    }.get(kind, kind.upper())
+
+
+def print_value_diff(command: dict[str, Any], root: dict[str, Any], color: Color) -> None:
+    command_value = command.get("value")
+    root_value = root.get("value")
+    if command_value is None and root_value is None:
+        return
+    if comparable_value(command_value) == comparable_value(root_value):
+        print(f"      values: {color.apply('match', 'green')}")
+        return
+
+    command_label = command.get("valueLabel") or "command value"
+    root_label = root.get("valueLabel") or "committed value"
+    print(f"      {command_label}: {compact_value(command_value)}")
+    print(f"      committed {root_label}: {compact_value(root_value)}")
+    for line in value_field_diffs(command_value, root_value):
+        print(f"      {color.apply(line, 'yellow')}")
+
+
+def value_field_diffs(left: Any, right: Any) -> list[str]:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return ["value differs"]
+    keys = sorted(set(left) | set(right))
+    lines: list[str] = []
+    for key in keys:
+        left_value = left.get(key, "<missing>")
+        right_value = right.get(key, "<missing>")
+        if comparable_value(left_value) != comparable_value(right_value):
+            lines.append(f"{key}: {compact_value(left_value)} -> {compact_value(right_value)}")
+    return lines or ["value differs"]
+
+
+def comparable_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): comparable_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, list):
+        return [comparable_value(item) for item in value]
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str)):
+        return str(value)
+    return value
+
+
+def compact_value(value: Any) -> str:
+    if isinstance(value, str):
+        return short(value, 80)
+    try:
+        return short(json.dumps(value, sort_keys=True), 120)
+    except TypeError:
+        return short(str(value), 120)
 
 
 def explicit_js_command(args: argparse.Namespace) -> dict[str, Any]:
-    arguments = simulation_arguments(args)
+    arguments = command_arguments(args)
     if args.contract_id or args.choice:
         if not args.contract_id:
             raise ValueError("--contract-id is required for an exercise simulation")
@@ -439,155 +1187,7 @@ def explicit_js_command(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def bundle_command_to_js_command(command: dict[str, Any]) -> dict[str, Any]:
-    kind = command.get("kind")
-    if kind == "create":
-        template = command.get("template")
-        if not template:
-            raise ValueError("bundle create command is missing template")
-        return {
-            "CreateCommand": {
-                "templateId": template,
-                "createArguments": command.get("createArguments") or {},
-            }
-        }
-    if kind == "exercise":
-        template = command.get("template")
-        contract_id = command.get("contractId")
-        choice = command.get("choice")
-        if not template or not contract_id or not choice:
-            raise ValueError("bundle exercise command is missing template, contractId, or choice")
-        return {
-            "ExerciseCommand": {
-                "templateId": template,
-                "contractId": contract_id,
-                "choice": choice,
-                "choiceArgument": command.get("choiceArgument") or {},
-            }
-        }
-    raise ValueError(f"unsupported bundle command kind for simulation: {kind!r}")
-
-
-def apply_simulation_overrides(commands: list[dict[str, Any]], overrides: list[str]) -> list[dict[str, Any]]:
-    if not overrides:
-        return commands
-    if len(commands) != 1:
-        raise ValueError("--override currently supports exactly one reconstructed command")
-
-    result = deepcopy(commands)
-    command = result[0]
-    for raw in overrides:
-        path, value = parse_path_assignment(raw, "--override")
-        apply_override_to_command(command, path, value)
-    return result
-
-
-def apply_override_to_command(command: dict[str, Any], path: list[str], value: Any) -> None:
-    command_kind: str
-    body: dict[str, Any]
-    argument_key: str
-    if isinstance(command.get("CreateCommand"), dict):
-        command_kind = "create"
-        body = command["CreateCommand"]
-        argument_key = "createArguments"
-    elif isinstance(command.get("ExerciseCommand"), dict):
-        command_kind = "exercise"
-        body = command["ExerciseCommand"]
-        argument_key = "choiceArgument"
-    else:
-        raise ValueError("--override only supports CreateCommand and ExerciseCommand")
-
-    if not path:
-        raise ValueError("--override path cannot be empty")
-
-    explicit_target = path[0]
-    if explicit_target in ("createArgument", "createArguments"):
-        if command_kind != "create":
-            raise ValueError("--override createArguments.* can only be used with create commands")
-        path = path[1:]
-    elif explicit_target in ("choiceArgument", "choiceArguments"):
-        if command_kind != "exercise":
-            raise ValueError("--override choiceArgument.* can only be used with exercise commands")
-        path = path[1:]
-
-    if not path:
-        body[argument_key] = value
-        return
-
-    arguments = body.get(argument_key)
-    if arguments in (None, {}):
-        arguments = {}
-        body[argument_key] = arguments
-    if not isinstance(arguments, dict):
-        raise ValueError(f"--override needs {argument_key} to be a JSON object")
-    set_json_path(arguments, path, value)
-
-
-def parse_path_assignment(raw: str, option_name: str) -> tuple[list[str], Any]:
-    if "=" not in raw:
-        raise ValueError(f"{option_name} must use key=value syntax: {raw!r}")
-    key, value = raw.split("=", 1)
-    path = [part.strip() for part in key.strip().split(".") if part.strip()]
-    if not path:
-        raise ValueError(f"{option_name} key cannot be empty: {raw!r}")
-    return path, parse_scalar(value.strip())
-
-
-def set_json_path(target: dict[str, Any], path: list[str], value: Any) -> None:
-    current = target
-    for key in path[:-1]:
-        existing = current.get(key)
-        if existing is None:
-            existing = {}
-            current[key] = existing
-        if not isinstance(existing, dict):
-            raise ValueError(f"--override cannot descend into non-object field {key!r}")
-        current = existing
-    current[path[-1]] = value
-
-
-def disclosed_contracts_from_bundle(bundle: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if bundle is None:
-        return []
-    acs = bundle.get("acsSnapshot") or {}
-    if not acs.get("available"):
-        return []
-    synchronizer_id = simulation_synchronizer_id(bundle)
-    contracts: dict[str, dict[str, Any]] = {}
-    for created_event, local_synchronizer_id in iter_created_events(acs.get("response")):
-        contract_id = pick(created_event, "contractId", "contract_id")
-        blob = pick(created_event, "createdEventBlob", "created_event_blob")
-        template_id = pick(created_event, "templateId", "template_id")
-        if not contract_id or not blob or not template_id:
-            continue
-        contracts[str(contract_id)] = {
-            "templateId": template_id,
-            "contractId": contract_id,
-            "createdEventBlob": blob,
-            "synchronizerId": local_synchronizer_id or synchronizer_id or "",
-        }
-    return list(contracts.values())
-
-
-def iter_created_events(value: Any, synchronizer_id: str | None = None):
-    if isinstance(value, list):
-        for item in value:
-            yield from iter_created_events(item, synchronizer_id)
-        return
-    if not isinstance(value, dict):
-        return
-
-    local_synchronizer_id = pick(value, "synchronizerId", "synchronizer_id") or synchronizer_id
-    created = pick(value, "createdEvent", "created_event", "created", "CreatedEvent", "createdEventValue")
-    if isinstance(created, dict):
-        yield created, local_synchronizer_id
-
-    for child in value.values():
-        if isinstance(child, (dict, list)):
-            yield from iter_created_events(child, local_synchronizer_id)
-
-
-def simulation_arguments(args: argparse.Namespace) -> Any:
+def command_arguments(args: argparse.Namespace) -> Any:
     if args.args_json and args.args_file:
         raise ValueError("use only one of --args-json or --args-file")
     if args.args_json:
@@ -653,59 +1253,19 @@ def parse_json_text(value: str, source: str) -> Any:
         raise ValueError(f"invalid JSON in {source}: {exc}") from exc
 
 
-def simulation_ledger_url(args: argparse.Namespace, bundle: dict[str, Any] | None) -> str:
-    ledger_url = args.ledger_url or ((bundle or {}).get("participant") or {}).get("ledgerUrl")
+def participant_ledger_url(args: argparse.Namespace) -> str:
+    ledger_url = args.ledger_url
     if not ledger_url:
-        raise ValueError("--ledger-url is required for engine-backed simulation")
+        raise ValueError("--participant-url/--ledger-url is required")
     return str(ledger_url)
 
 
-def simulation_user_id(args: argparse.Namespace) -> str | None:
+def prepare_user_id(args: argparse.Namespace) -> str | None:
     if args.user_id:
         return args.user_id
     if not args.token and not args.token_file:
         return "participant_admin"
     return None
-
-
-def simulation_act_as(args: argparse.Namespace, bundle: dict[str, Any] | None) -> list[str]:
-    explicit = parse_parties(args.act_as)
-    if explicit:
-        return explicit
-
-    command_context = (bundle or {}).get("command") or {}
-    parties: list[str] = []
-    commands = command_context.get("commands")
-    if isinstance(commands, list):
-        for command in commands:
-            if isinstance(command, dict):
-                parties.extend(list_str(command.get("actAs") or []))
-    if parties:
-        return unique(parties)
-
-    read_as = simulation_read_as(args, bundle)
-    if read_as:
-        return [read_as[0]]
-    raise ValueError("--act-as is required for simulation")
-
-
-def simulation_read_as(args: argparse.Namespace, bundle: dict[str, Any] | None) -> list[str]:
-    explicit = parse_parties(args.read_as + args.party)
-    if explicit:
-        return explicit
-    participant = (bundle or {}).get("participant") or {}
-    return list_str(participant.get("readAs") or [])
-
-
-def simulation_package_ids(bundle: dict[str, Any] | None) -> list[str]:
-    packages = (bundle or {}).get("packages") or {}
-    return list_str(packages.get("packageIds") or [])
-
-
-def simulation_synchronizer_id(bundle: dict[str, Any] | None) -> str | None:
-    time_context = (bundle or {}).get("time") or {}
-    value = time_context.get("synchronizerId")
-    return str(value) if value else None
 
 
 def unique(values: list[str]) -> list[str]:
@@ -716,50 +1276,6 @@ def unique(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
-
-
-def simulation_success_report(
-    request: dict[str, Any],
-    response: Any,
-    source_url: str,
-    bundle: dict[str, Any] | None,
-) -> str:
-    source_update = ((bundle or {}).get("trace") or {}).get("updateId")
-    lines = [
-        "Historical transaction re-simulation prepared" if source_update else "Command preparation completed",
-        "  source:       Ledger JSON API InteractiveSubmissionService.PrepareSubmission",
-        f"  endpoint:     {source_url}",
-        "  committed:    no",
-        f"  command id:   {request.get('commandId')}",
-        f"  act-as:       {', '.join(request.get('actAs') or [])}",
-        f"  read-as:      {', '.join(request.get('readAs') or []) or '-'}",
-        f"  commands:     {len(request.get('commands') or [])}",
-        f"  disclosures:  {len(request.get('disclosedContracts') or [])}",
-    ]
-    if source_update:
-        lines.append(f"  from update:  {source_update}")
-    if isinstance(response, dict):
-        prepared = response.get("preparedTransaction")
-        tx_hash = response.get("preparedTransactionHash")
-        hashing = response.get("hashingSchemeVersion")
-        if tx_hash:
-            lines.append(f"  tx hash:      {short(str(tx_hash), 80)}")
-        if hashing:
-            lines.append(f"  hashing:      {hashing}")
-        if isinstance(prepared, str):
-            lines.append(f"  prepared tx:  {len(prepared)} bytes/base64 chars returned")
-        elif prepared is not None:
-            lines.append("  prepared tx:  structured payload returned")
-        if response.get("costEstimation") is not None:
-            lines.append("  cost:         returned")
-    lines.append("")
-    lines.append("This is a non-committing participant prepare call, not an event-tree replay.")
-    if source_update:
-        lines.append("The command was reconstructed from the committed update and replay context available to this participant projection.")
-    if request.get("disclosedContracts"):
-        lines.append("Replay-context ACS contracts were attached as disclosed contracts, so consumed historical inputs can be resolved during preparation.")
-    lines.append("Source-level stepping still needs a local LF engine adapter or participant-side debug events.")
-    return "\n".join(lines)
 
 
 def load_config(explicit_path: str | None) -> dict[str, Any]:
@@ -858,139 +1374,6 @@ def load_update(
     raise ValueError("choose a source: --scan-url BASE with target, or --ledger-url BASE with target")
 
 
-def create_bundle(args: argparse.Namespace, trace: NormalizedTrace, raw_update: dict[str, Any] | None) -> dict[str, Any]:
-    package_ids = sorted({
-        package
-        for ev in trace.events_by_id.values()
-        for package in [package_from_template(ev.template)]
-        if package
-    })
-    bundle = {
-        "schema": BUNDLE_SCHEMA,
-        "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "mode": "participant-projection",
-        "trace": trace_to_json(trace),
-        "participant": {
-            "ledgerUrl": getattr(args, "ledger_url", None),
-            "scanUrl": getattr(args, "scan_url", None),
-            "readAs": trace.projection.get("readAs") or [],
-        },
-        "time": {
-            "recordTime": trace.record_time,
-            "offset": trace.offset,
-            "synchronizerId": trace.synchronizer_id,
-            "status": "record time and update offset captured from the committed update",
-        },
-        "packages": package_metadata_context(getattr(args, "dar", []), getattr(args, "debug_info", []), package_ids),
-        "command": infer_command_context(trace),
-        "acsSnapshot": None,
-        "engine": {
-            "available": False,
-            "required": "Daml-LF execution/debug adapter",
-            "reason": "Trace and ACS data are sufficient for event stepping, not source-level execution stepping.",
-        },
-        "privacy": {
-            "scope": trace.projection.get("note"),
-            "readAs": trace.projection.get("readAs") or [],
-            "missingPrivateDataPolicy": "private data outside this participant projection is not present in the bundle",
-        },
-    }
-    if raw_update is not None:
-        bundle["rawUpdate"] = raw_update
-
-    if getattr(args, "no_acs", False):
-        bundle["acsSnapshot"] = unavailable_snapshot("disabled by --no-acs")
-    elif trace.source != "ledger-json-api":
-        bundle["acsSnapshot"] = unavailable_snapshot("ACS snapshots require a participant Ledger JSON API endpoint")
-    else:
-        bundle["acsSnapshot"] = fetch_acs_snapshot(args, trace)
-    return bundle
-
-
-def fetch_acs_snapshot(args: argparse.Namespace, trace: NormalizedTrace) -> dict[str, Any]:
-    if not args.ledger_url:
-        return unavailable_snapshot("--ledger-url is required for ACS snapshot capture")
-    active_at_offset = args.active_at_offset or pre_update_offset(trace.offset)
-    if active_at_offset is None:
-        return unavailable_snapshot(f"could not derive a snapshot offset from update offset {trace.offset!r}")
-
-    url = join_url(args.ledger_url, LEDGER_ACTIVE_CONTRACTS_PATH)
-    token = args.token or read_token_file(args.token_file)
-    body = active_contracts_body(active_at_offset)
-    try:
-        response = http_json("POST", url, body=body, token=token)
-    except Exception as exc:
-        return unavailable_snapshot(str(exc), active_at_offset=active_at_offset, source_url=url)
-
-    return {
-        "available": True,
-        "sourceUrl": url,
-        "activeAtOffset": active_at_offset,
-        "request": body,
-        "response": response,
-        "contractCount": active_contract_count(response),
-        "note": "participant-visible ACS snapshot for the authorized read context",
-    }
-
-
-def active_contracts_body(active_at_offset: str | int) -> dict[str, Any]:
-    wildcard = {
-        "cumulative": [
-            {
-                "identifierFilter": {
-                    "WildcardFilter": {
-                        "value": {
-                            "includeCreatedEventBlob": True,
-                        }
-                    }
-                }
-            }
-        ]
-    }
-    return {
-        "verbose": True,
-        "eventFormat": None,
-        "activeAtOffset": active_at_offset,
-        "filter": {
-            "filtersByParty": {},
-            "filtersForAnyParty": wildcard,
-        },
-    }
-
-
-def unavailable_snapshot(reason: str, active_at_offset: str | int | None = None, source_url: str | None = None) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "available": False,
-        "reason": reason,
-    }
-    if active_at_offset is not None:
-        result["activeAtOffset"] = active_at_offset
-    if source_url is not None:
-        result["sourceUrl"] = source_url
-    return result
-
-
-def pre_update_offset(offset: str | None) -> int | str | None:
-    if not offset:
-        return None
-    try:
-        value = int(offset)
-    except ValueError:
-        return offset
-    return max(value - 1, 0)
-
-
-def active_contract_count(response: Any) -> int | None:
-    if isinstance(response, list):
-        return len(response)
-    if isinstance(response, dict):
-        for key in ("activeContracts", "active_contracts", "createdEvents", "created_events"):
-            value = response.get(key)
-            if isinstance(value, list):
-                return len(value)
-    return None
-
-
 def package_metadata_context(dar_paths: list[str], debug_info_paths: list[str], package_ids: list[str]) -> dict[str, Any]:
     found: list[str] = []
     missing: list[str] = []
@@ -1016,152 +1399,11 @@ def package_metadata_context(dar_paths: list[str], debug_info_paths: list[str], 
         "missingDarPaths": missing,
         "missingDebugInfoPaths": missing_debug_info,
         "status": (
-            "local DAR/debug-info metadata attached"
+            "local package/source metadata attached"
             if found or found_debug_info
-            else "package ids captured; DAR/debug-info metadata must be supplied by local project or registry"
+            else "package ids captured; package/source metadata must be supplied by local project or registry"
         ),
     }
-
-
-def infer_command_context(trace: NormalizedTrace) -> dict[str, Any]:
-    roots = [
-        trace.events_by_id[event_id]
-        for event_id in trace.root_event_ids
-        if event_id in trace.events_by_id
-    ]
-    if len(roots) != 1:
-        return {
-            "available": False,
-            "reason": "Cannot infer a single replay command from an update with zero or multiple root events. Capture the command at submission time or provide it manually.",
-        }
-
-    root = roots[0]
-    if root.kind == "exercise" and root.contract_id and root.choice:
-        return {
-            "available": True,
-            "source": "inferred-from-ledger-effects",
-            "confidence": "partial",
-            "warning": "This is not the original command envelope. Command id, deduplication, disclosed-contract context, and some submission metadata are not recoverable from a committed update.",
-            "commands": [
-                {
-                    "kind": "exercise",
-                    "template": root.template,
-                    "contractId": root.contract_id,
-                    "choice": root.choice,
-                    "choiceArgument": simplify_lf_value(root.argument),
-                    "actAs": root.acting_parties,
-                }
-            ],
-        }
-
-    if root.kind == "create" and root.template and root.payload is not None:
-        act_as = root.signatories or trace.projection.get("readAs") or []
-        return {
-            "available": True,
-            "source": "inferred-from-ledger-effects",
-            "confidence": "partial",
-            "warning": "This is not the original command envelope. The act-as parties are inferred from signatories/readAs and may need confirmation.",
-            "commands": [
-                {
-                    "kind": "create",
-                    "template": root.template,
-                    "createArguments": simplify_lf_value(root.payload),
-                    "actAs": act_as,
-                }
-            ],
-        }
-
-    return {
-        "available": False,
-        "reason": f"Cannot infer a replay command from root event kind {root.kind!r}. Capture the command at submission time or provide it manually.",
-    }
-
-
-def default_bundle_path(update_id: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", update_id)
-    return Path(f"trace-{safe[:24]}.bundle.json")
-
-
-def maybe_load_bundle_target(target: str | None) -> dict[str, Any] | None:
-    if not target:
-        return None
-    path = Path(target)
-    if not path.exists() or not path.is_file():
-        return None
-    return load_bundle(path)
-
-
-def load_bundle(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"bundle must be a JSON object: {path}")
-    if data.get("schema") != BUNDLE_SCHEMA:
-        raise ValueError(f"unsupported bundle schema in {path}: {data.get('schema')!r}")
-    if not isinstance(data.get("trace"), dict):
-        raise ValueError(f"bundle is missing trace object: {path}")
-    return data
-
-
-def bundle_summary(bundle: dict[str, Any]) -> str:
-    trace = bundle.get("trace") or {}
-    acs = bundle.get("acsSnapshot") or {}
-    command = bundle.get("command") or {}
-    engine = bundle.get("engine") or {}
-    packages = bundle.get("packages") or {}
-    lines = [
-        "Replay bundle",
-        f"  schema:       {bundle.get('schema')}",
-        f"  update:       {trace.get('updateId', '-')}",
-        f"  mode:         {bundle.get('mode', '-')}",
-        f"  ACS:          {snapshot_status(acs)}",
-        f"  packages:     {'attached' if packages.get('available') else 'ids only'}",
-        f"  command:      {command_status(command)}",
-        f"  engine hooks: {'available' if engine.get('available') else 'missing'}",
-    ]
-    return "\n".join(lines)
-
-
-def snapshot_status(acs: dict[str, Any]) -> str:
-    if acs.get("available"):
-        count = acs.get("contractCount")
-        suffix = f", {count} active contracts" if count is not None else ""
-        return f"captured at offset {acs.get('activeAtOffset')}{suffix}"
-    return f"not captured ({acs.get('reason', 'unknown reason')})"
-
-
-def command_status(command: dict[str, Any]) -> str:
-    if command.get("available"):
-        source = command.get("source")
-        confidence = command.get("confidence")
-        suffix = f" ({source}, {confidence})" if source or confidence else ""
-        return "available" + suffix
-    return "missing"
-
-
-def simulation_readiness_report(bundle: dict[str, Any]) -> str:
-    acs = bundle.get("acsSnapshot") or {}
-    command = bundle.get("command") or {}
-    engine = bundle.get("engine") or {}
-    packages = bundle.get("packages") or {}
-    time_context = bundle.get("time") or {}
-    missing: list[str] = []
-    if not acs.get("available"):
-        missing.append("ACS snapshot")
-    if not time_context.get("recordTime") and not time_context.get("offset"):
-        missing.append("ledger time/offset context")
-    if not packages.get("available"):
-        missing.append("DAR/package metadata")
-    if not command.get("available"):
-        missing.append("command envelope")
-    if not engine.get("available"):
-        missing.append("Daml-LF execution/debug adapter")
-    if missing:
-        return (
-            bundle_summary(bundle)
-            + "\n\nSimulation readiness: not executable yet\n"
-            + "\n".join(f"- missing {item}" for item in missing)
-        )
-    return bundle_summary(bundle) + "\n\nSimulation readiness: executable"
 
 
 def http_json(method: str, url: str, body: dict[str, Any] | None = None, token: str | None = None) -> Any:
@@ -2150,7 +2392,7 @@ class Stepper:
 
     def run(self) -> None:
         print_summary(self.trace)
-        print("\n" + self.color.apply("Interactive commands:", "bold") + " n/next, p/prev, s/source, expr, si/step-in, vars, b <spec>, c/continue, tree, context, json, q")
+        print("\n" + self.color.apply("Visualizer commands:", "bold") + " n/next, p/prev, j <n>, s/source, vars, b <spec>, c/continue, tree, context, json, q")
         if self.source_index.has_sources():
             print(self.color.apply("source roots:", "cyan"), ", ".join(self.source_index.roots))
         if not self.order:
@@ -2175,10 +2417,6 @@ class Stepper:
                 self.jump(cmd)
             elif cmd in ("s", "src", "source"):
                 self.show_source()
-            elif cmd in ("expr", "expressions"):
-                self.show_expression_steps()
-            elif cmd in ("si", "step-in", "stepi"):
-                self.step_expression()
             elif cmd in ("vars", "locals"):
                 self.show_variables()
             elif cmd.startswith("b "):
@@ -2193,13 +2431,11 @@ class Stepper:
                 self.show_tree()
             elif cmd == "context":
                 print(debug_context_report(self.trace))
-            elif cmd == "replay":
-                print(explain_replay())
             elif cmd == "json":
                 event = self.trace.events_by_id[self.order[self.index]]
                 print(json.dumps(event_to_json(event), indent=2, sort_keys=True))
             elif cmd == "help":
-                print("n/next, p/prev, j <index>, s/source, expr, si/step-in, vars, b <spec>, bp, clear [n], c/continue, tree, context, replay, json, q")
+                print("n/next, p/prev, j <index>, s/source, vars, b <spec>, bp, clear [n], c/continue, tree, context, json, q")
             else:
                 print("unknown command; try `help`")
 
@@ -2262,7 +2498,7 @@ class Stepper:
         ev = self.trace.events_by_id[self.order[self.index]]
         loc = self.source_index.location_for_event(ev)
         if loc is None:
-            print(self.color.apply("no source location available for this step; provide matching --debug-info or registry metadata", "yellow"))
+            print(self.color.apply("no source location available for this event; provide matching source metadata", "yellow"))
             return
         print(self.render_source_snippet(loc))
 
@@ -2304,7 +2540,7 @@ class Stepper:
     def show_expression_steps(self) -> None:
         steps = self.current_expression_steps()
         if not steps:
-            print(self.color.apply("no expression steps available; provide source metadata and a replay bundle with visible inputs", "yellow"))
+            print(self.color.apply("no expression steps available; provide source metadata and visible inputs", "yellow"))
             return
         for idx, step in enumerate(steps, start=1):
             print(f"{self.color.apply(str(idx) + '.', 'gray')} {self.color.apply(step.label, 'bold')}  {self.color.apply(Path(step.line.path).name + ':' + str(step.line.line), 'cyan')}")
@@ -2438,13 +2674,17 @@ class Stepper:
         print(self.color.apply("no later breakpoint hit", "yellow"))
 
     def show_tree(self) -> None:
+        current_event_id = self.order[self.index] if self.order else None
+
         def visit(event_id: str, depth: int) -> None:
             ev = self.trace.events_by_id.get(event_id)
             if not ev:
                 return
-            marker = {"create": "+", "exercise": ">", "archive": "x"}.get(ev.kind, "-")
-            label = ev.choice if ev.choice else ev.template
-            print(f"{'  ' * depth}{marker} {ev.event_id} {ev.kind} {label or ''}")
+            cursor = "=>" if event_id == current_event_id else "  "
+            indent = "  " * depth
+            target = short_template(ev.template) or ev.template or ""
+            label = f"{target}.{ev.choice}" if ev.choice and target else (ev.choice or target)
+            print(f"{indent}{cursor} {ev.kind.upper():<8} {ev.event_id} {label}")
             for child in ev.child_event_ids:
                 visit(child, depth + 1)
 
@@ -2489,27 +2729,23 @@ def debug_context_report(trace: NormalizedTrace) -> str:
         "event order and parent/child links" if trace.root_event_ids else "flat event list",
         "choice arguments and create payloads where exposed",
         "party/witness labels where exposed",
-        "source breakpoints and event/input-contract variables when matching debug-info metadata and replay bundle are available",
     ]
     if package_ids:
         present.append(f"package ids referenced by events: {', '.join(package_ids[:5])}")
 
     missing = [
-        "verified DAR/source metadata unless provided by a registry",
-        "full original command envelope unless captured at submission time",
+        "source metadata unless provided by the local project or registry",
+        "full original command envelope unless captured separately",
         "private subtransactions outside this projection",
-        "negative key lookups/fetch/no-such-key interpreter details not emitted in UpdateService trees",
-        "exact replay state unless ACS/related contracts are captured at the right offset",
-        "Daml-LF interpreter step hooks for expression-level local variables and step-into-choice-body debugging",
+        "operator logs unless attached separately",
     ]
     return (
-        "\nDebug context assessment\n"
+        "\nTrace context assessment\n"
         "------------------------\n"
         "Present in this trace:\n"
         + "\n".join(f"- {item}" for item in present)
-        + "\n\nNeeded for true replay/step debugging:\n"
+        + "\n\nNot present in this trace artifact:\n"
         + "\n".join(f"- {item}" for item in missing)
-        + "\n\nConclusion: this POC supports event/source-level stepping now. LF expression stepping still needs engine instrumentation."
     )
 
 
@@ -2532,35 +2768,7 @@ def explain_apis() -> str:
 
         In proposal terms:
         - Scan is the public entry point.
-        - Ledger API is the private/richer debugging entry point.
-        """
-    ).strip()
-
-
-def explain_replay() -> str:
-    return textwrap.dedent(
-        """
-        What local step-by-step replay needs
-        -----------------------------------
-        Event/source stepping needs the transaction tree plus optional local source metadata.
-        Expression-level execution replay needs more:
-
-        - update id and participant projection
-        - package ids plus verified DAR/source metadata
-        - visible input contracts and ACS snapshot at the right offset
-        - command/choice arguments and act-as/read-as context
-        - ledger time and disclosed-contract context
-        - Daml-LF engine instrumentation to pause/step inside choice bodies
-
-        Likely extension points:
-        - source/package registry for verified DAR/source metadata
-        - replay bundle format that captures participant-visible state
-        - Daml-LF engine trace/debug adapter for expression-level stepping
-
-        What should not be claimed:
-        - direct access to global Canton state
-        - replay of private subtransactions outside the connected participant projection
-        - direct access to participant Postgres databases as a product interface
+        - Ledger API is the authorized participant inspection entry point.
         """
     ).strip()
 
@@ -2590,7 +2798,7 @@ def trace_from_json(data: dict[str, Any]) -> NormalizedTrace:
     }
     return NormalizedTrace(
         update_id=str(data.get("updateId") or ""),
-        source=str(data.get("source") or "bundle"),
+        source=str(data.get("source") or "artifact"),
         source_url=data.get("sourceUrl"),
         projection=data.get("projection") if isinstance(data.get("projection"), dict) else {},
         root_event_ids=list_str(data.get("rootEventIds") or []),
@@ -2658,11 +2866,6 @@ def parse_parties(values: list[str]) -> list[str]:
             if stripped:
                 parties.append(stripped)
     return parties
-
-
-def has_cli_option(argv: list[str], *names: str) -> bool:
-    prefixes = tuple(name + "=" for name in names)
-    return any(arg in names or arg.startswith(prefixes) for arg in argv)
 
 
 def read_token_file(path: str | None) -> str | None:
