@@ -103,10 +103,17 @@ def build_trace_parser() -> argparse.ArgumentParser:
             "Subcommands: "
             "dpm trace open <trace.json>, "
             "dpm trace prepare --commands commands.json, "
+            "dpm trace --command-id <command-id>, "
             "dpm trace compare <update-a> <update-b>."
         ),
     )
     parser.add_argument("target", nargs="?", help="Update id or CantonScan update URL.")
+    parser.add_argument("--command-id", help="Command id for completion lookup when no update id exists.")
+    parser.add_argument("--act-as", action="append", default=[], help="Submitting party for completion lookup. Repeatable.")
+    parser.add_argument("--completion-user-id", help="Ledger API user id for completion lookup.")
+    parser.add_argument("--begin-exclusive", default="0", help="Minimum completion offset to query from. Defaults to 0.")
+    parser.add_argument("--completion-limit", type=int, default=100, help="Maximum completions to scan. Defaults to 100.")
+    parser.add_argument("--completion-timeout-ms", type=int, default=1000, help="Completion query idle timeout. Defaults to 1000.")
     parser.add_argument("--visualize", action="store_true", help="Open the interactive transaction visualizer.")
     add_common_connection_args(parser)
     parser.add_argument("--export", "--out", dest="export", help="Write a portable trace artifact JSON file.")
@@ -119,6 +126,7 @@ def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--scan-url", help="Scan API base URL, e.g. https://.../api/scan.")
     parser.add_argument("--ledger-url", help="Ledger JSON API base URL, e.g. http://localhost:7575.")
     parser.add_argument("--participant-url", dest="ledger_url", help="Alias for --ledger-url.")
+    parser.add_argument("--submitter", dest="ledger_url", help="Alias for --ledger-url / --participant-url.")
     parser.add_argument("--token-file", help="Bearer token file for Ledger JSON API.")
     parser.add_argument("--access-token-file", dest="token_file", help="Alias for --token-file.")
     parser.add_argument("--token", help="Bearer token for Ledger JSON API.")
@@ -171,7 +179,7 @@ def prepare_main(argv: list[str]) -> int:
     parser.add_argument("--command-id", help="Command id. Defaults to dpm-trace-prepare-<uuid>.")
     parser.add_argument("--user-id", help="Ledger API user id for PrepareSubmission.")
     parser.add_argument("--synchronizer-id", default="", help="Optional synchronizer id.")
-    parser.add_argument("--export", "--out", dest="export", help="Write a prepared command artifact JSON file.")
+    parser.add_argument("--export", "--out", dest="export", help="Write a prepared transaction artifact JSON file.")
     parser.add_argument("--print-json", action="store_true", help="Print the raw request and response.")
     args = parser.parse_args(argv)
     try:
@@ -184,12 +192,13 @@ def prepare_main(argv: list[str]) -> int:
 def compare_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="dpm trace compare",
-        description="Compare prepared commands, committed updates, or completion/error artifacts.",
+        description="Compare prepared transactions, successful transactions, or completion/error files.",
     )
     parser.add_argument("updates", nargs="*", help="Two update ids to compare.")
-    parser.add_argument("--prepared", help="Prepared command artifact produced by dpm trace prepare.")
-    parser.add_argument("--update", help="Committed update id to compare against --prepared.")
-    parser.add_argument("--completion", help="Command id for a failed/successful completion.")
+    parser.add_argument("--prepared", help="Prepared transaction artifact produced by dpm trace prepare.")
+    parser.add_argument("--update", help="Successful transaction update id to compare against --prepared.")
+    parser.add_argument("--completion", dest="completion", help="Deprecated alias for --command-id.")
+    parser.add_argument("--command-id", dest="completion", help="Command id for a failed/successful completion.")
     parser.add_argument("--completion-file", help="JSON file containing a completion response/artifact.")
     parser.add_argument("--completion-user-id", help="Ledger API user id for completion lookup.")
     parser.add_argument("--begin-exclusive", default="0", help="Minimum completion offset to query from. Defaults to 0.")
@@ -197,6 +206,7 @@ def compare_main(argv: list[str]) -> int:
     parser.add_argument("--completion-timeout-ms", type=int, default=1000, help="Completion query idle timeout. Defaults to 1000.")
     parser.add_argument("--log-file", action="append", default=[], help="Operator/application log file to attach and correlate. Repeatable.")
     add_common_connection_args(parser)
+    parser.add_argument("--act-as", action="append", default=[], help="Submitting party for completion lookup. Repeatable.")
     parser.add_argument("--print-json", action="store_true", help="Print machine-readable comparison JSON.")
     args = parser.parse_args(argv)
     try:
@@ -215,8 +225,23 @@ def run_trace(args: argparse.Namespace) -> int:
 
     if args.explain_apis:
         print(explain_apis())
-        if not args.target:
+        if not args.target and not args.command_id:
             return 0
+
+    if args.command_id:
+        try:
+            completion = fetch_completion_by_command_id(args, args.command_id)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.print_json:
+            print(json.dumps(completion, indent=2, sort_keys=True))
+            return 0
+        print_completion_trace(completion, color=Color.from_mode(args.color))
+        if args.visualize:
+            print("")
+            print("No transaction tree is available from completion data alone. Use dpm trace <update-id> if the completion includes an update id.")
+        return 0
 
     try:
         update_id = extract_update_id(args.target)
@@ -322,7 +347,7 @@ def run_compare(args: argparse.Namespace) -> int:
             completion = load_completion_for_compare(args)
             comparison = compare_prepared_to_completion(prepared, completion)
         else:
-            raise ValueError("--prepared needs --update, --completion, or --completion-file")
+            raise ValueError("--prepared needs --update, --command-id, or --completion-file")
     elif len(args.updates) == 2:
         left = fetch_trace_for_compare(args, args.updates[0])
         right = fetch_trace_for_compare(args, args.updates[1])
@@ -500,18 +525,18 @@ def load_completion_for_compare(args: argparse.Namespace) -> dict[str, Any]:
         if path.exists() and path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                raise ValueError("--completion file must contain a JSON object")
+                raise ValueError("--command-id/--completion file must contain a JSON object")
             return attach_log_matches(args, normalize_completion(data))
         return attach_log_matches(args, fetch_completion_by_command_id(args, args.completion))
-    raise ValueError("provide --completion or --completion-file")
+    raise ValueError("provide --command-id or --completion-file")
 
 
 def fetch_completion_by_command_id(args: argparse.Namespace, command_id: str) -> dict[str, Any]:
     apply_config_defaults(args, load_config(args.config))
     ledger_url = participant_ledger_url(args)
-    parties = parse_parties(args.read_as + args.party)
+    parties = completion_lookup_parties(args)
     if not parties:
-        raise ValueError("--read-as/--party is required for completion lookup")
+        raise ValueError("--act-as, --read-as, or --party is required for completion lookup")
     token = args.token or read_token_file(args.token_file)
     body: dict[str, Any] = {"parties": parties}
     if args.completion_user_id:
@@ -541,6 +566,14 @@ def fetch_completion_by_command_id(args: argparse.Namespace, command_id: str) ->
     raise ValueError(
         f"completion {command_id!r} not found in the queried completion window; "
         "try --begin-exclusive with an earlier offset or --completion-file with captured JSON"
+    )
+
+
+def completion_lookup_parties(args: argparse.Namespace) -> list[str]:
+    return parse_parties(
+        list(getattr(args, "act_as", []) or [])
+        + list(getattr(args, "read_as", []) or [])
+        + list(getattr(args, "party", []) or [])
     )
 
 
@@ -923,6 +956,28 @@ def print_prepared_completion_comparison(comparison: dict[str, Any], color: Colo
             print(f"  ... {len(log_matches) - 8} more")
 
 
+def print_completion_trace(completion: dict[str, Any], color: Color) -> None:
+    status_code, message = completion_status_fields(completion)
+    update_id = pick(completion, "updateId", "update_id")
+    committed = bool(update_id)
+    failed = status_code not in (None, "OK", 0, "0") and not committed
+    lookup = completion.get("lookup") if isinstance(completion.get("lookup"), dict) else {}
+
+    print(color.apply("DPM trace completion", "bold"))
+    print(f"  result:     {completion_result(committed, failed, color)}")
+    print(f"  command id: {pick(completion, 'commandId', 'command_id') or lookup.get('commandId') or '-'}")
+    print(f"  submission: {pick(completion, 'submissionId', 'submission_id') or '-'}")
+    print(f"  update id:  {short(str(update_id or '-'), 80)}")
+    print(f"  offset:     {pick(completion, 'offset') or '-'}")
+    print(f"  status:     {status_code if status_code is not None else '-'}")
+    print(f"  message:    {message or '-'}")
+    if lookup:
+        print(f"  parties:    {party_list_summary(lookup.get('parties') or [])}")
+        print(f"  source:     {completion.get('source') or '-'}")
+    if not update_id:
+        print("  trace:      no committed transaction tree is available for this completion")
+
+
 def comparison_result(has_differences: bool, color: Color) -> str:
     if has_differences:
         return color.apply("visible differences found", "yellow", "bold")
@@ -1256,14 +1311,14 @@ def parse_json_text(value: str, source: str) -> Any:
 def participant_ledger_url(args: argparse.Namespace) -> str:
     ledger_url = args.ledger_url
     if not ledger_url:
-        raise ValueError("--participant-url/--ledger-url is required")
+        raise ValueError("--submitter/--participant-url/--ledger-url is required")
     return str(ledger_url)
 
 
 def prepare_user_id(args: argparse.Namespace) -> str | None:
-    if args.user_id:
+    if getattr(args, "user_id", None):
         return args.user_id
-    if not args.token and not args.token_file:
+    if not getattr(args, "token", None) and not getattr(args, "token_file", None):
         return "participant_admin"
     return None
 
