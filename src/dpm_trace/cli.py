@@ -62,6 +62,9 @@ class SourceLocation:
     path: str
     line: int
     label: str
+    column: int = 1
+    end_line: int | None = None
+    end_column: int | None = None
 
 
 @dataclass
@@ -104,16 +107,19 @@ def build_trace_parser() -> argparse.ArgumentParser:
             "dpm trace open <trace.json>, "
             "dpm trace prepare --commands commands.json, "
             "dpm trace --command-id <command-id>, "
+            "dpm trace --completion-file completion.json, "
             "dpm trace compare <update-a> <update-b>."
         ),
     )
     parser.add_argument("target", nargs="?", help="Update id or CantonScan update URL.")
     parser.add_argument("--command-id", help="Command id for completion lookup when no update id exists.")
+    parser.add_argument("--completion-file", help="JSON file containing a captured completion response/artifact.")
     parser.add_argument("--act-as", action="append", default=[], help="Submitting party for completion lookup. Repeatable.")
     parser.add_argument("--completion-user-id", help="Ledger API user id for completion lookup.")
     parser.add_argument("--begin-exclusive", default="0", help="Minimum completion offset to query from. Defaults to 0.")
     parser.add_argument("--completion-limit", type=int, default=100, help="Maximum completions to scan. Defaults to 100.")
     parser.add_argument("--completion-timeout-ms", type=int, default=1000, help="Completion query idle timeout. Defaults to 1000.")
+    parser.add_argument("--log-file", action="append", default=[], help="Operator/application log file to attach and correlate. Repeatable.")
     parser.add_argument("--visualize", action="store_true", help="Open the interactive transaction visualizer.")
     add_common_connection_args(parser)
     parser.add_argument("--export", "--out", dest="export", help="Write a portable trace artifact JSON file.")
@@ -134,6 +140,8 @@ def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--party", action="append", default=[], help="Alias for --read-as.")
     parser.add_argument("--dar", action="append", default=[], help="Local DAR to attach as package metadata. Repeatable.")
     parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--daml-yaml", action="append", default=[], help="Path to daml.yaml for local source diagnostics. Repeatable.")
+    parser.add_argument("--source-root", action="append", default=[], help="Local Daml source root for source diagnostics. Repeatable.")
     parser.add_argument(
         "--config",
         help="Trace config JSON. Defaults to .dpm-trace.json found in the current directory or a parent.",
@@ -228,16 +236,22 @@ def run_trace(args: argparse.Namespace) -> int:
         if not args.target and not args.command_id:
             return 0
 
-    if args.command_id:
+    if args.command_id or args.completion_file:
         try:
-            completion = fetch_completion_by_command_id(args, args.command_id)
+            if args.completion_file:
+                data = json.loads(Path(args.completion_file).read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("--completion-file must contain a JSON object")
+                completion = attach_log_matches(args, normalize_completion(data))
+            else:
+                completion = attach_log_matches(args, fetch_completion_by_command_id(args, args.command_id))
         except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         if args.print_json:
             print(json.dumps(completion, indent=2, sort_keys=True))
             return 0
-        print_completion_trace(completion, color=Color.from_mode(args.color))
+        print_completion_trace(completion, color=Color.from_mode(args.color), source_index=source_index_from_args(args, None))
         if args.visualize:
             print("")
             print("No transaction tree is available from completion data alone. Use dpm trace <update-id> if the completion includes an update id.")
@@ -358,7 +372,7 @@ def run_compare(args: argparse.Namespace) -> int:
     if args.print_json:
         print(json.dumps(comparison, indent=2, sort_keys=True))
         return 0
-    print_comparison(comparison, color)
+    print_comparison(comparison, color, source_index=source_index_from_args(args, None))
     return 0
 
 
@@ -811,7 +825,7 @@ def event_templates(trace: NormalizedTrace) -> set[str]:
     return {ev.template for ev in trace.events_by_id.values() if ev.template}
 
 
-def print_comparison(comparison: dict[str, Any], color: Color) -> None:
+def print_comparison(comparison: dict[str, Any], color: Color, source_index: SourceIndex | None = None) -> None:
     kind = comparison.get("kind")
     if kind == "update-vs-update":
         print_update_comparison(comparison, color)
@@ -820,7 +834,7 @@ def print_comparison(comparison: dict[str, Any], color: Color) -> None:
         print_prepared_update_comparison(comparison, color)
         return
     if kind == "prepared-vs-completion":
-        print_prepared_completion_comparison(comparison, color)
+        print_prepared_completion_comparison(comparison, color, source_index=source_index)
         return
 
     print(color.apply("DPM trace comparison", "bold"))
@@ -919,7 +933,11 @@ def print_prepared_update_comparison(comparison: dict[str, Any], color: Color) -
     print_count_diff(diff.get("stateDiff") or {}, None, color)
 
 
-def print_prepared_completion_comparison(comparison: dict[str, Any], color: Color) -> None:
+def print_prepared_completion_comparison(
+    comparison: dict[str, Any],
+    color: Color,
+    source_index: SourceIndex | None = None,
+) -> None:
     prepared = comparison.get("left") or {}
     completion = comparison.get("right") or {}
     diff = comparison.get("diff") or {}
@@ -943,6 +961,15 @@ def print_prepared_completion_comparison(comparison: dict[str, Any], color: Colo
     print(f"  offset:     {completion.get('offset') or '-'}")
     print(f"  status:     {status_code if status_code is not None else '-'}")
     print(f"  message:    {completion.get('message') or '-'}")
+    completion_for_diag = dict(completion)
+    if status_code is not None:
+        completion_for_diag["code"] = status_code
+    source_matches = completion_source_diagnostics(completion_for_diag, source_index)
+    if source_matches:
+        print("")
+        print(color.apply("Source diagnostics", "cyan", "bold"))
+        for loc in source_matches:
+            print(indent_text(render_source_diagnostic(loc, source_index, color)))
     log_matches = diff.get("logMatches") or []
     if log_matches:
         print("")
@@ -956,7 +983,7 @@ def print_prepared_completion_comparison(comparison: dict[str, Any], color: Colo
             print(f"  ... {len(log_matches) - 8} more")
 
 
-def print_completion_trace(completion: dict[str, Any], color: Color) -> None:
+def print_completion_trace(completion: dict[str, Any], color: Color, source_index: SourceIndex | None = None) -> None:
     status_code, message = completion_status_fields(completion)
     update_id = pick(completion, "updateId", "update_id")
     committed = bool(update_id)
@@ -976,6 +1003,23 @@ def print_completion_trace(completion: dict[str, Any], color: Color) -> None:
         print(f"  source:     {completion.get('source') or '-'}")
     if not update_id:
         print("  trace:      no committed transaction tree is available for this completion")
+    source_matches = completion_source_diagnostics(completion, source_index)
+    if source_matches:
+        print("")
+        print(color.apply("Source diagnostics", "cyan", "bold"))
+        for loc in source_matches:
+            print(indent_text(render_source_diagnostic(loc, source_index, color)))
+    log_matches = completion.get("logMatches") or []
+    if log_matches:
+        print("")
+        print(color.apply("Log matches", "cyan", "bold"))
+        for match in log_matches[:8]:
+            if "error" in match:
+                print(f"  {match.get('file')}: {match['error']}")
+            else:
+                print(f"  {match.get('file')}:{match.get('line')}: {match.get('text')}")
+        if len(log_matches) > 8:
+            print(f"  ... {len(log_matches) - 8} more")
 
 
 def comparison_result(has_differences: bool, color: Color) -> str:
@@ -990,6 +1034,55 @@ def completion_result(committed: bool, failed: bool, color: Color) -> str:
     if failed:
         return color.apply("completion failed", "red", "bold")
     return color.apply("completion status available", "yellow", "bold")
+
+
+def completion_source_diagnostics(completion: dict[str, Any], source_index: SourceIndex | None) -> list[SourceLocation]:
+    if source_index is None or not source_index.files:
+        return []
+    _, message = completion_status_fields(completion)
+    needles = completion_source_needles(str(message or ""))
+    seen: set[tuple[str, int, int]] = set()
+    result: list[SourceLocation] = []
+    for needle in needles:
+        for loc in source_index.find_text(needle, label="failed completion"):
+            key = (loc.path, loc.line, loc.column)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(loc)
+            if len(result) >= 5:
+                return result
+    return result
+
+
+def completion_source_needles(message: str) -> list[str]:
+    candidates: list[str] = []
+    for pattern in (r'"([^"]{4,})"', r"'([^']{4,})'", r"`([^`]{4,})`"):
+        candidates.extend(match.group(1).strip() for match in re.finditer(pattern, message))
+    for separator in (":", "because", "failed with"):
+        if separator in message:
+            candidates.append(message.rsplit(separator, 1)[-1].strip())
+    candidates.append(message.strip())
+
+    cleaned: list[str] = []
+    for candidate in candidates:
+        candidate = candidate.strip(" .\n\r\t")
+        if len(candidate) < 4:
+            continue
+        if candidate not in cleaned:
+            cleaned.append(candidate)
+    return cleaned
+
+
+def render_source_diagnostic(loc: SourceLocation, source_index: SourceIndex | None, color: Color) -> str:
+    if source_index is None:
+        return format_source_path(loc)
+    rendered = source_index.snippet(loc, radius=2)
+    lines = rendered.splitlines()
+    if not lines:
+        return format_source_path(loc)
+    lines[0] = color.apply(lines[0], "cyan")
+    return "\n".join(lines)
 
 
 def trace_compare_summary(summary: dict[str, Any]) -> str:
@@ -1377,6 +1470,12 @@ def apply_config_defaults(args: argparse.Namespace, config: dict[str, Any]) -> N
     if hasattr(args, "debug_info") and not args.debug_info:
         debug_info_paths = os.environ.get("DPM_TRACE_DEBUG_INFO") or get_config(config, "debugInfoPaths", "debug_info_paths", "debugInfo", "debug_info")
         args.debug_info = config_values(debug_info_paths)
+    if hasattr(args, "daml_yaml") and not args.daml_yaml:
+        daml_yaml_paths = os.environ.get("DPM_TRACE_DAML_YAML") or get_config(config, "damlYamlPaths", "daml_yaml_paths", "damlYaml", "daml_yaml")
+        args.daml_yaml = config_values(daml_yaml_paths)
+    if hasattr(args, "source_root") and not args.source_root:
+        source_roots = os.environ.get("DPM_TRACE_SOURCE_ROOT") or get_config(config, "sourceRoots", "source_roots", "sourceRoot", "source_root")
+        args.source_root = config_values(source_roots)
 
 
 def set_default(args: argparse.Namespace, attr: str, value: Any) -> None:
@@ -2059,13 +2158,22 @@ def short_template(template: str | None) -> str | None:
 
 
 class SourceIndex:
-    def __init__(self, debug_info_paths: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        debug_info_paths: list[str] | None = None,
+        source_roots: list[str] | None = None,
+        daml_yaml_paths: list[str] | None = None,
+    ) -> None:
         self.roots: list[str] = []
         self.templates: dict[str, SourceLocation] = {}
         self.choices: dict[str, SourceLocation] = {}
         self.files: dict[str, list[str]] = {}
         for path in debug_info_paths or []:
             self._load_debug_info(Path(path).expanduser())
+        for path in daml_yaml_paths or []:
+            self._load_daml_yaml(Path(path).expanduser())
+        for path in source_roots or []:
+            self._load_source_root(Path(path).expanduser())
 
     def _load_debug_info(self, path: Path) -> None:
         try:
@@ -2112,6 +2220,46 @@ class SourceIndex:
                 elif kind == "choice":
                     self.choices[package_key] = loc
 
+    def _load_daml_yaml(self, path: Path) -> None:
+        if not path.exists():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return
+        source_values: list[str] = []
+        for line in lines:
+            match = re.match(r"\s*source\s*:\s*(.+?)\s*$", line)
+            if match:
+                source_values.append(strip_yaml_scalar(match.group(1)))
+        if not source_values:
+            source_values.append(".")
+        for value in source_values:
+            root = Path(value).expanduser()
+            if not root.is_absolute():
+                root = path.parent / root
+            self._load_source_root(root)
+
+    def _load_source_root(self, root: Path) -> None:
+        root = root.resolve()
+        if root.is_file():
+            candidates = [root]
+            root_marker = root.parent
+        else:
+            candidates = sorted(root.rglob("*.daml")) if root.exists() else []
+            root_marker = root
+        root_str = str(root_marker)
+        if root_str not in self.roots:
+            self.roots.append(root_str)
+        for candidate in candidates:
+            self._load_source_file(candidate)
+
+    def _load_source_file(self, path: Path) -> None:
+        try:
+            self.files[str(path)] = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return
+
     def location_for_event(self, ev: TraceEvent) -> SourceLocation | None:
         parsed = parse_template_ref(ev.template)
         if parsed is None:
@@ -2124,15 +2272,18 @@ class SourceIndex:
     def snippet(self, loc: SourceLocation, radius: int = 2) -> str:
         lines = self.files.get(loc.path)
         if not lines:
-            return f"{loc.path}:{loc.line}"
+            return format_source_path(loc)
         start = max(loc.line - radius, 1)
         end = min(loc.line + radius, len(lines))
         rendered: list[str] = []
         width = len(str(end))
         for line_no in range(start, end + 1):
             marker = ">" if line_no == loc.line else " "
-            rendered.append(f"{marker} {line_no:{width}d} | {lines[line_no - 1]}")
-        return f"{loc.path}:{loc.line}\n" + "\n".join(rendered)
+            prefix = f"{marker} {line_no:{width}d} | "
+            rendered.append(prefix + lines[line_no - 1])
+            if line_no == loc.line and loc.column > 1:
+                rendered.append(" " * (len(prefix) + loc.column - 1) + "^")
+        return f"{format_source_path(loc)}\n" + "\n".join(rendered)
 
     def body_lines(self, loc: SourceLocation) -> list[SourceLine]:
         lines = self.files.get(loc.path)
@@ -2158,6 +2309,34 @@ class SourceIndex:
     def has_sources(self) -> bool:
         return bool(self.templates or self.choices or self.files)
 
+    def find_text(self, text: str, label: str, limit: int = 5) -> list[SourceLocation]:
+        if not text:
+            return []
+        result: list[SourceLocation] = []
+        for path, lines in sorted(self.files.items()):
+            for line_no, line in enumerate(lines, start=1):
+                column = line.find(text)
+                if column < 0:
+                    continue
+                result.append(SourceLocation(path, line_no, label, column + 1))
+                if len(result) >= limit:
+                    return result
+        return result
+
+
+def strip_yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if value.startswith(('"', "'")) and value.endswith(('"', "'")) and len(value) >= 2:
+        return value[1:-1]
+    return value
+
+
+def format_source_path(loc: SourceLocation) -> str:
+    suffix = f":{loc.line}"
+    if loc.column and loc.column > 1:
+        suffix += f":{loc.column}"
+    return f"{loc.path}{suffix}"
+
 
 def leading_spaces(value: str) -> int:
     return len(value) - len(value.lstrip(" "))
@@ -2168,7 +2347,13 @@ def source_index_from_args(args: argparse.Namespace, bundle: dict[str, Any] | No
     debug_info_paths.extend(getattr(args, "debug_info", []) or [])
     packages = (bundle or {}).get("packages") or {}
     debug_info_paths.extend(list_str(packages.get("debugInfoPaths") or []))
-    return SourceIndex(unique([path for path in debug_info_paths if path]))
+    source_roots = list_str(getattr(args, "source_root", []) or [])
+    daml_yaml_paths = list_str(getattr(args, "daml_yaml", []) or [])
+    return SourceIndex(
+        unique([path for path in debug_info_paths if path]),
+        source_roots=unique([path for path in source_roots if path]),
+        daml_yaml_paths=unique([path for path in daml_yaml_paths if path]),
+    )
 
 
 def parse_template_ref(template: str | None) -> tuple[str, str, str] | None:
@@ -2525,7 +2710,7 @@ class Stepper:
         print(label_value("template", ev.template or "-", color))
         loc = self.source_index.location_for_event(ev)
         if loc is not None:
-            print(label_value("source", f"{loc.path}:{loc.line}  ({loc.label})", color))
+            print(label_value("source", f"{format_source_path(loc)}  ({loc.label})", color))
         print(label_value("contract", short(ev.contract_id), color))
         if ev.choice:
             print(label_value("choice", f"{ev.choice}  consuming={ev.consuming}", color))
@@ -2564,7 +2749,7 @@ class Stepper:
         start = max(loc.line - radius, 1)
         end = min(loc.line + radius, len(lines))
         width = len(str(end))
-        rendered = [self.color.apply(f"{loc.path}:{loc.line}", "cyan")]
+        rendered = [self.color.apply(format_source_path(loc), "cyan")]
         for line_no in range(start, end + 1):
             marker = ">" if line_no == loc.line else " "
             prefix = f"{marker} {line_no:{width}d} | "

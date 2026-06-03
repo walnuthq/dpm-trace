@@ -58,7 +58,23 @@ Inspect a failed submission by command id:
 dpm trace --command-id <command-id> \
   --submitter http://localhost:<json-ledger-api-port> \
   --act-as '<party-id>' \
+  --log-file /tmp/canton-participant.log \
   --access-token-file ./token.txt
+```
+
+Or inspect captured completion JSON:
+
+```bash
+dpm trace --completion-file completion.json \
+  --log-file /tmp/canton-participant.log
+```
+
+With local Daml sources available, failed completions can point back to the
+contract line and column:
+
+```bash
+dpm trace --completion-file completion.json \
+  --daml-yaml <path-to-daml-project>/daml.yaml
 ```
 
 Export a trace artifact:
@@ -127,7 +143,8 @@ dpm trace compare \
   --prepared prepared.json \
   --command-id <command-id> \
   --submitter http://localhost:<json-ledger-api-port> \
-  --act-as '<party-id>'
+  --act-as '<party-id>' \
+  --log-file /tmp/canton-participant.log
 ```
 
 Compare two successful transactions:
@@ -146,8 +163,21 @@ dpm trace compare \
   --completion-file completion.json
 ```
 
+## Failed submission source demo
+
+This fixture shows the CI-style path: consume a captured completion/error JSON
+and resolve it against local Daml sources.
+
+```bash
+dpm trace --completion-file examples/failed-with-source.completion.json \
+  --daml-yaml <path-to-daml-project>/daml.yaml
+```
+
+The output includes a `Source diagnostics` block with `file:line:column` and a
+caret under the matching Daml code.
+
 ## Notes
 
 - Output is participant-scoped. It is not a global Canton transaction.
 - Failed submissions may not have an update id. In that case comparison uses completion/error data.
-- Source-level debugging and compiler debug-info generation are out of scope for this PoC.
+- Source diagnostics use local source/project metadata when available. Compiler debug-info generation is out of scope for this PoC.

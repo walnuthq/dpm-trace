@@ -1,0 +1,9 @@
+{
+  "commandId": "dpm-trace-demo-withdraw-too-much",
+  "submissionId": "dpm-trace-demo-submission",
+  "offset": "42",
+  "status": {
+    "code": "FAILED_PRECONDITION",
+    "message": "Insufficient balance"
+  }
+}
