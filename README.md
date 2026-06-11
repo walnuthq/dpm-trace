@@ -69,12 +69,16 @@ dpm trace --completion-file completion.json \
   --log-file /tmp/canton-participant.log
 ```
 
-With local Daml sources available, failed completions can point back to the
-contract line and column:
+With a local Daml project and DAR available, failed completions can point back
+to the contract line and column. When `--dar` is provided, `dpm trace` uses
+`damlc inspect` to confirm the failure text exists in the compiled package
+before resolving it against local sources.
 
 ```bash
 dpm trace --completion-file completion.json \
-  --daml-yaml <path-to-daml-project>/daml.yaml
+  --daml-yaml <path-to-daml-project>/daml.yaml \
+  --dar <path-to-daml-project>/.daml/dist/app.dar \
+  --damlc daml
 ```
 
 Export a trace artifact:
@@ -165,19 +169,49 @@ dpm trace compare \
 
 ## Failed submission source demo
 
-This fixture shows the CI-style path: consume a captured completion/error JSON
-and resolve it against local Daml sources.
+This fixture shows the CI-style path: consume a captured completion/error JSON,
+verify it against a compiled DAR with `damlc inspect`, and resolve it against
+local Daml sources.
 
 ```bash
 dpm trace --completion-file examples/failed-with-source.completion.json \
-  --daml-yaml <path-to-daml-project>/daml.yaml
+  --daml-yaml <path-to-daml-project>/daml.yaml \
+  --dar <path-to-daml-project>/.daml/dist/app.dar \
+  --damlc daml
 ```
 
 The output includes a `Source diagnostics` block with `file:line:column` and a
 caret under the matching Daml code.
 
+## Tests
+
+Fast source-diagnostic tests:
+
+```bash
+lit tests
+```
+
+Inspect-backed source diagnostic test:
+
+```bash
+DPM_TRACE_RUN_DAMLC_INSPECT=1 \
+DPM_TRACE_DAMLC=daml \
+lit tests/completion-source-inspect.test
+```
+
+Opt-in local Canton integration test:
+
+```bash
+DPM_TRACE_RUN_REAL_CANTON=1 \
+DPM_TRACE_DAML=daml \
+DPM_TRACE_DAMLC=daml \
+DPM_TRACE_CANTON_JAR=<path-to-canton.jar> \
+DPM_TRACE_DAML_HELPER=<path-to-daml-helper> \
+lit tests/real-canton-failed-completion.test
+```
+
 ## Notes
 
 - Output is participant-scoped. It is not a global Canton transaction.
 - Failed submissions may not have an update id. In that case comparison uses completion/error data.
-- Source diagnostics use local source/project metadata when available. Compiler debug-info generation is out of scope for this PoC.
+- Source diagnostics use `damlc inspect` plus local source/project metadata when available, with local source matching as a fallback. Compiler debug-info generation is out of scope for this PoC.

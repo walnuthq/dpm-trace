@@ -1,0 +1,1 @@
+# RUN: %python %root/tests/check-no-local-paths.py %root

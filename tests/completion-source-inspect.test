@@ -1,0 +1,11 @@
+# REQUIRES: damlc-inspect
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli --completion-file %root/examples/failed-with-source.completion.json --daml-yaml %root/../daml-examples/daml-3x/daml.yaml --dar %root/../daml-examples/daml-3x/.daml/dist/counter-example-1.0.0.dar --damlc %damlc --color never | FileCheck %s
+
+# CHECK: DPM trace completion
+# CHECK: result:     completion failed
+# CHECK: message:    Insufficient balance
+# CHECK: Source diagnostics
+# CHECK: FailureDemo.daml:20:18
+# CHECK: basis: damlc inspect: FailureDemo
+# CHECK: abort "Insufficient balance"
+# CHECK: ^

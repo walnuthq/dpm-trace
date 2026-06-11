@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import textwrap
 import urllib.error
@@ -139,6 +140,7 @@ def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--read-as", action="append", default=[], help="Party to read as. Repeatable.")
     parser.add_argument("--party", action="append", default=[], help="Alias for --read-as.")
     parser.add_argument("--dar", action="append", default=[], help="Local DAR to attach as package metadata. Repeatable.")
+    parser.add_argument("--damlc", help="Daml assistant or damlc executable for package inspection. Defaults to daml.")
     parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--daml-yaml", action="append", default=[], help="Path to daml.yaml for local source diagnostics. Repeatable.")
     parser.add_argument("--source-root", action="append", default=[], help="Local Daml source root for source diagnostics. Repeatable.")
@@ -1044,7 +1046,7 @@ def completion_source_diagnostics(completion: dict[str, Any], source_index: Sour
     seen: set[tuple[str, int, int]] = set()
     result: list[SourceLocation] = []
     for needle in needles:
-        for loc in source_index.find_text(needle, label="failed completion"):
+        for loc in source_index.find_failure_text(needle):
             key = (loc.path, loc.line, loc.column)
             if key in seen:
                 continue
@@ -1082,6 +1084,8 @@ def render_source_diagnostic(loc: SourceLocation, source_index: SourceIndex | No
     if not lines:
         return format_source_path(loc)
     lines[0] = color.apply(lines[0], "cyan")
+    if loc.label:
+        lines.insert(1, f"basis: {loc.label}")
     return "\n".join(lines)
 
 
@@ -1467,6 +1471,7 @@ def apply_config_defaults(args: argparse.Namespace, config: dict[str, Any]) -> N
     if hasattr(args, "dar") and not args.dar:
         dar_paths = os.environ.get("DPM_TRACE_DAR") or get_config(config, "darPaths", "dar_paths", "dar")
         args.dar = config_values(dar_paths)
+    set_default(args, "damlc", os.environ.get("DPM_TRACE_DAMLC") or get_config(config, "damlc"))
     if hasattr(args, "debug_info") and not args.debug_info:
         debug_info_paths = os.environ.get("DPM_TRACE_DEBUG_INFO") or get_config(config, "debugInfoPaths", "debug_info_paths", "debugInfo", "debug_info")
         args.debug_info = config_values(debug_info_paths)
@@ -2163,17 +2168,24 @@ class SourceIndex:
         debug_info_paths: list[str] | None = None,
         source_roots: list[str] | None = None,
         daml_yaml_paths: list[str] | None = None,
+        dar_paths: list[str] | None = None,
+        damlc: str | None = None,
     ) -> None:
         self.roots: list[str] = []
         self.templates: dict[str, SourceLocation] = {}
         self.choices: dict[str, SourceLocation] = {}
         self.files: dict[str, list[str]] = {}
+        self.file_modules: dict[str, str] = {}
+        self.module_files: dict[str, list[str]] = {}
+        self.inspect_modules: dict[str, list[str]] = {}
         for path in debug_info_paths or []:
             self._load_debug_info(Path(path).expanduser())
         for path in daml_yaml_paths or []:
             self._load_daml_yaml(Path(path).expanduser())
         for path in source_roots or []:
             self._load_source_root(Path(path).expanduser())
+        for path in dar_paths or []:
+            self._load_dar_inspect(Path(path).expanduser(), damlc or "daml")
 
     def _load_debug_info(self, path: Path) -> None:
         try:
@@ -2256,9 +2268,44 @@ class SourceIndex:
 
     def _load_source_file(self, path: Path) -> None:
         try:
-            self.files[str(path)] = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             return
+        path_str = str(path)
+        self.files[path_str] = lines
+        module = daml_module_name(lines)
+        if module:
+            self.file_modules[path_str] = module
+            self.module_files.setdefault(module, [])
+            if path_str not in self.module_files[module]:
+                self.module_files[module].append(path_str)
+
+    def _load_dar_inspect(self, path: Path, damlc: str) -> None:
+        if not path.exists():
+            return
+        command = damlc_inspect_command(damlc, path)
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return
+        if completed.returncode != 0:
+            return
+        current_module: str | None = None
+        for line in completed.stdout.splitlines():
+            module_match = re.match(r"module\s+([A-Za-z0-9_.']+)\s+where\b", line)
+            if module_match:
+                current_module = module_match.group(1)
+                self.inspect_modules.setdefault(current_module, [])
+                continue
+            if current_module:
+                self.inspect_modules.setdefault(current_module, []).append(line)
 
     def location_for_event(self, ev: TraceEvent) -> SourceLocation | None:
         parsed = parse_template_ref(ev.template)
@@ -2310,10 +2357,38 @@ class SourceIndex:
         return bool(self.templates or self.choices or self.files)
 
     def find_text(self, text: str, label: str, limit: int = 5) -> list[SourceLocation]:
+        return self._find_text(text, label, None, limit)
+
+    def find_failure_text(self, text: str, limit: int = 5) -> list[SourceLocation]:
+        if not text:
+            return []
+        modules = self.inspect_modules_containing(text)
+        if modules:
+            paths = [
+                path
+                for module in modules
+                for path in self.module_files.get(module, [])
+            ]
+            if paths:
+                label = "damlc inspect: " + ", ".join(modules[:3])
+                return self._find_text(text, label, paths, limit)
+        return self._find_text(text, "local source", None, limit)
+
+    def inspect_modules_containing(self, text: str) -> list[str]:
+        if not text:
+            return []
+        result: list[str] = []
+        for module, lines in sorted(self.inspect_modules.items()):
+            if any(text in line for line in lines):
+                result.append(module)
+        return result
+
+    def _find_text(self, text: str, label: str, paths: list[str] | None, limit: int) -> list[SourceLocation]:
         if not text:
             return []
         result: list[SourceLocation] = []
-        for path, lines in sorted(self.files.items()):
+        items = [(path, self.files[path]) for path in paths or sorted(self.files) if path in self.files]
+        for path, lines in items:
             for line_no, line in enumerate(lines, start=1):
                 column = line.find(text)
                 if column < 0:
@@ -2322,6 +2397,21 @@ class SourceIndex:
                 if len(result) >= limit:
                     return result
         return result
+
+
+def daml_module_name(lines: list[str]) -> str | None:
+    for line in lines[:50]:
+        match = re.match(r"\s*module\s+([A-Za-z0-9_.']+)\s+where\b", line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def damlc_inspect_command(damlc: str, path: Path) -> list[str]:
+    executable = str(Path(damlc).expanduser())
+    if Path(executable).name == "damlc":
+        return [executable, "inspect", str(path), "--detail", "2"]
+    return [executable, "damlc", "inspect", str(path), "--detail", "2"]
 
 
 def strip_yaml_scalar(value: str) -> str:
@@ -2349,10 +2439,13 @@ def source_index_from_args(args: argparse.Namespace, bundle: dict[str, Any] | No
     debug_info_paths.extend(list_str(packages.get("debugInfoPaths") or []))
     source_roots = list_str(getattr(args, "source_root", []) or [])
     daml_yaml_paths = list_str(getattr(args, "daml_yaml", []) or [])
+    dar_paths = list_str(getattr(args, "dar", []) or [])
     return SourceIndex(
         unique([path for path in debug_info_paths if path]),
         source_roots=unique([path for path in source_roots if path]),
         daml_yaml_paths=unique([path for path in daml_yaml_paths if path]),
+        dar_paths=unique([path for path in dar_paths if path]),
+        damlc=getattr(args, "damlc", None) or "daml",
     )
 
 

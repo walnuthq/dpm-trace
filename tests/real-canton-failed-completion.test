@@ -1,0 +1,9 @@
+# REQUIRES: real-canton
+# RUN: bash %root/tests/run-real-canton-failure.sh %root | FileCheck %s
+
+# CHECK: DPM trace completion
+# CHECK: result:     completion failed
+# CHECK: message:    Insufficient balance
+# CHECK: Source diagnostics
+# CHECK: FailureDemo.daml:20:18
+# CHECK: basis: damlc inspect: FailureDemo
