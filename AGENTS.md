@@ -36,6 +36,7 @@ Key areas to orient in the file:
 - Source mapping: `SourceIndex` (loads `daml.yaml` sources and, with `--dar`, `damlc inspect`), `completion_source_needles`, `render_source_diagnostic`.
 - Test runner (`dpm trace test`): `test_main` → `run_test` → `daml_test_command`, `parse_junit`, `transaction_html_to_text`, `transaction_stats`, `test_failure_locations`, `print_test_report` / `test_report_json`.
 - Integration runner (`--integration`): `run_integration_tests` boots a local Canton (`canton_config_text`, `canton_bootstrap_text`, `find_free_ports`, `wait_for_parties`, `build_dar`), exports `DPM_TRACE_IT_*` env, runs `lit`, tears down.
+- Scaffolder (`--init`): `run_init` writes `itests/` from `integration_lit_cfg_text` / `integration_example_test_text` (the canonical generated lit config — keep `daml-tests/itests/lit.cfg.py` in sync with it).
 - Submit primitive (`dpm trace submit`): `submit_main` → `run_submit` (submit-and-wait, prints the update id).
 - Spawning daml/damlc/canton: `daml_child_env()` (drops `DPM_RESOLUTION_FILE`, forces a UTF-8 locale).
 

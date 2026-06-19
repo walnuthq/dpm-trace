@@ -247,7 +247,16 @@ workflow, and a regression demo — lives in the sibling `daml-tests` package.
 ### Integration tests (managed Canton + lit)
 
 Unit tests run on the in-memory IDE ledger. For integration tests against a
-**real local Canton node**, point `test` at an `lit` suite with `--integration`:
+**real local Canton node**, point `test` at an `lit` suite with `--integration`.
+
+Scaffold the suite once with `--init` (writes `itests/lit.cfg.py` and a sample
+test into the package):
+
+```bash
+dpm trace test . --init
+```
+
+Then run it:
 
 ```bash
 dpm trace test . --integration itests \
@@ -290,7 +299,9 @@ dpm trace submit \
   --arg owner='<party-id>' --arg count=0
 ```
 
-Use `--print-json` for the full submit-and-wait response.
+Use `--print-json` for the full submit-and-wait response, or `--allow-fail` to
+capture a rejected submission as JSON (which `dpm trace --completion-file` then
+maps back to source) instead of erroring out.
 
 ## Failed submission source demo
 
