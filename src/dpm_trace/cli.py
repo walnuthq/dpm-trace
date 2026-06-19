@@ -296,15 +296,23 @@ def run_test(args: argparse.Namespace) -> int:
     txns_dir = work / "transactions"
     table_dir = work / "tables"
     try:
+        # Attempt 1: full outputs (results + transaction trees/stats). `daml test`
+        # writes Unicode box-drawing characters into the transaction HTML and can
+        # abort before producing JUnit under a non-UTF-8 locale, so the trees are
+        # best-effort: if JUnit is missing we retry for results only.
         command, env = daml_test_command(args, root, junit_path, txns_dir, table_dir)
         completed = subprocess.run(
-            command,
-            cwd=str(root),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+            command, cwd=str(root), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
+        trees_available = junit_path.exists()
+        if not trees_available:
+            command, env = daml_test_command(args, root, junit_path)
+            completed = subprocess.run(
+                command, cwd=str(root), env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+
         if not junit_path.exists():
             sys.stderr.write(completed.stdout or "")
             print(
@@ -316,13 +324,16 @@ def run_test(args: argparse.Namespace) -> int:
 
         cases = parse_junit(junit_path)
         source_index = source_index_from_args(args, None)
+        summary_stats = parse_test_summary(completed.stdout)
         for case in cases:
             if case.status == "passed":
                 html_file = txns_dir / f"transaction-{case.name}.html"
-                if html_file.exists():
+                if trees_available and html_file.exists():
                     case.transactions_text = transaction_html_to_text(html_file.read_text(encoding="utf-8", errors="replace"))
                     case.stats = transaction_stats(case.transactions_text)
                     case.touched_locations = transaction_locations(case.transactions_text)
+                else:
+                    case.stats = summary_stats.get(case.name, {})
             else:
                 case.diagnostics = test_failure_locations(case.message or "", source_index)
 
@@ -333,6 +344,9 @@ def run_test(args: argparse.Namespace) -> int:
             print(json.dumps(test_report_json(args, root, command, cases), indent=2, sort_keys=True))
         else:
             print_test_report(args, root, command, cases, color, source_index)
+            if not trees_available and not getattr(args, "no_trees", False):
+                print("\n" + color.apply("note:", "gray")
+                      + " transaction trees were unavailable in this environment; showing results only.")
         return 1 if any(case.status != "passed" for case in cases) else 0
     finally:
         if getattr(args, "keep_artifacts", False):
@@ -351,8 +365,8 @@ def daml_test_command(
     args: argparse.Namespace,
     root: Path,
     junit_path: Path,
-    txns_dir: Path,
-    table_dir: Path,
+    txns_dir: Path | None = None,
+    table_dir: Path | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     executable = str(Path(args.daml or "daml").expanduser())
     name = Path(executable).name
@@ -362,11 +376,11 @@ def daml_test_command(
         command = [executable, "test"]
         if name == "daml":
             command.append("--no-legacy-assistant-warning")
-    command += [
-        "--junit", str(junit_path),
-        "--transactions-output", str(txns_dir),
-        "--table-output", str(table_dir),
-    ]
+    command += ["--junit", str(junit_path)]
+    if txns_dir is not None:
+        command += ["--transactions-output", str(txns_dir)]
+    if table_dir is not None:
+        command += ["--table-output", str(table_dir)]
     if getattr(args, "test_pattern", None):
         command += ["--test-pattern", args.test_pattern]
     files = [f for f in getattr(args, "files", []) or [] if f]
@@ -374,6 +388,27 @@ def daml_test_command(
         command.append("--files")
         command += files
     return command, daml_child_env({"DAML_PACKAGE": str(root)})
+
+
+def parse_test_summary(stdout: str) -> dict[str, dict[str, int]]:
+    """Best-effort per-test stats from `daml test`'s plain-text Test Summary.
+
+    Lines look like: `daml/Test.daml:testTransfer: ok, 1 active contracts, 2 transactions.`
+    This is ASCII, so it is available even when the (Unicode) transaction HTML
+    could not be written.
+    """
+    result: dict[str, dict[str, int]] = {}
+    pattern = re.compile(
+        r"^\S*:([A-Za-z0-9_']+):\s*ok,\s*(\d+)\s+active contracts?,\s*(\d+)\s+transactions?"
+    )
+    for line in (stdout or "").splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            result[match.group(1)] = {
+                "transactions": int(match.group(3)),
+                "activeContracts": int(match.group(2)),
+            }
+    return result
 
 
 def daml_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -558,6 +593,8 @@ def test_stats_text(stats: dict[str, int], color: Color) -> str:
         parts.append(color.apply(f"x{stats['archives']} archive", "red"))
     if stats.get("expectedFailures"):
         parts.append(color.apply(f"!{stats['expectedFailures']} expected-fail", "blue"))
+    if "creates" not in stats and stats.get("activeContracts"):
+        parts.append(color.apply(f"{stats['activeContracts']} active", "gray"))
     return "  ".join(parts)
 
 
