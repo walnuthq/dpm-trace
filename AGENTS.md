@@ -35,8 +35,8 @@ Key areas to orient in the file:
 - Failed submissions / completions: `fetch_completion_by_command_id`, `normalize_completion`, `print_completion_trace`.
 - Source mapping: `SourceIndex` (loads `daml.yaml` sources and, with `--dar`, `damlc inspect`), `completion_source_needles`, `render_source_diagnostic`.
 - Test runner (`dpm trace test`): `test_main` → `run_test` → `daml_test_command`, `parse_junit`, `transaction_html_to_text`, `transaction_stats`, `test_failure_locations`, `print_test_report` / `test_report_json`.
-- Integration runner (`--integration`): `run_integration_tests` boots a local Canton (`canton_config_text`, `canton_bootstrap_text`, `find_free_ports`, `wait_for_parties`, `build_dar`), exports `DPM_TRACE_IT_*` env, runs `lit`, tears down.
-- Scaffolder (`--init`): `run_init` writes `itests/` from `integration_lit_cfg_text` / `integration_example_test_text` (the canonical generated lit config — keep `daml-tests/itests/lit.cfg.py` in sync with it).
+- Integration runner (`--integration`): `run_integration_tests` boots a local Canton (`canton_config_text`, `canton_bootstrap_text`, `find_free_ports`, `wait_for_parties`, `build_dar`), exports `DPM_TRACE_IT_*` env, runs `lit`, tears down. `--parties Name@N` (`parse_party_placements`) provisions N participants; tests reach participant K via `%ledger{K}` and tolerate ingestion lag with `dpm trace --wait`.
+- Scaffolder (`--init`): `run_init` writes `itests/` (from `integration_lit_cfg_text` / `integration_example_test_text` — keep `daml-tests/itests/lit.cfg.py` in sync) and a self-contained `unittests/` package (`unit_test_daml_yaml_text` / `unit_test_example_text`).
 - Submit primitive (`dpm trace submit`): `submit_main` → `run_submit` (submit-and-wait, prints the update id).
 - Spawning daml/damlc/canton: `daml_child_env()` (drops `DPM_RESOLUTION_FILE`, forces a UTF-8 locale).
 

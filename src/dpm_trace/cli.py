@@ -145,6 +145,7 @@ def build_trace_parser() -> argparse.ArgumentParser:
 
 
 def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--wait", type=float, default=0.0, help="Retry the lookup for up to N seconds if the update is not yet visible (e.g. another participant is still catching up).")
     parser.add_argument("--scan-url", help="Scan API base URL, e.g. https://.../api/scan.")
     parser.add_argument("--ledger-url", help="Ledger JSON API base URL, e.g. http://localhost:7575.")
     parser.add_argument("--participant-url", dest="ledger_url", help="Alias for --ledger-url.")
@@ -354,8 +355,10 @@ def test_main(argv: list[str]) -> int:
     parser.add_argument("--lit", help="lit executable for --integration. Defaults to lit.")
     parser.add_argument("--parties", help="Comma-separated parties to allocate for --integration. Defaults to Alice,Bob.")
     parser.add_argument("--canton-timeout", type=int, default=180, help="Seconds to wait for Canton readiness. Defaults to 180.")
-    parser.add_argument("--init", dest="init", action="store_true", help="Scaffold the integration test directory (itests/ + lit.cfg.py) in the package and exit.")
-    parser.add_argument("--itests-dir", default="itests", help="Directory name to scaffold with --init. Defaults to itests.")
+    parser.add_argument("--init", dest="init", action="store_true", help="Scaffold the test directories (itests/ + unittests/) in the package and exit.")
+    parser.add_argument("--itests-dir", default="itests", help="Integration test directory to scaffold with --init. Defaults to itests.")
+    parser.add_argument("--unittests-dir", default="unittests", help="Unit test package directory to scaffold with --init. Defaults to unittests.")
+    parser.add_argument("--no-unittests", action="store_true", help="With --init, do not scaffold the unittests/ package.")
     args = parser.parse_args(argv)
     try:
         return run_test(args)
@@ -458,7 +461,8 @@ def run_integration_tests(args: argparse.Namespace) -> int:
         print("error: --canton-jar (or DPM_TRACE_CANTON_JAR) must point at a Canton jar", file=sys.stderr)
         return 2
     lit = args.lit or "lit"
-    parties = [p.strip() for p in (args.parties or "Alice,Bob").split(",") if p.strip()]
+    placements = parse_party_placements(args.parties or "Alice,Bob")
+    num_participants = max((index for _, index in placements), default=1)
 
     dar = args.dar[0] if getattr(args, "dar", None) else None
     if not dar:
@@ -470,29 +474,35 @@ def run_integration_tests(args: argparse.Namespace) -> int:
     log_path = work / "canton.log"
     proc = None
     try:
-        seq_pub, seq_admin, med_admin, p_admin, p_ledger, p_http = find_free_ports(6)
-        (work / "canton.conf").write_text(canton_config_text(seq_pub, seq_admin, med_admin, p_admin, p_ledger, p_http))
-        (work / "bootstrap.canton").write_text(canton_bootstrap_text(dar, parties))
+        ports = find_free_ports(3 + 3 * num_participants)
+        seq_pub, seq_admin, med_admin = ports[:3]
+        participant_ports = [tuple(ports[3 + 3 * i: 6 + 3 * i]) for i in range(num_participants)]
+        participant_urls = [f"http://127.0.0.1:{trio[2]}" for trio in participant_ports]
+        (work / "canton.conf").write_text(canton_config_text(seq_pub, seq_admin, med_admin, participant_ports))
+        (work / "bootstrap.canton").write_text(canton_bootstrap_text(dar, placements, num_participants))
 
-        print(f"booting local Canton (participant JSON API :{p_http}); deploying {Path(dar).name} ...")
+        endpoints = ", ".join(f"participant{i + 1} :{participant_ports[i][2]}" for i in range(num_participants))
+        print(f"booting local Canton ({endpoints}); deploying {Path(dar).name} ...")
         with open(log_path, "wb") as log_fh:
             proc = subprocess.Popen(
                 ["java", "-jar", str(Path(canton_jar).expanduser()), "daemon",
                  "-c", str(work / "canton.conf"), "--bootstrap", str(work / "bootstrap.canton"), "--no-tty"],
                 stdout=log_fh, stderr=subprocess.STDOUT, cwd=str(work), env=daml_child_env(),
             )
-        ledger_url = f"http://127.0.0.1:{p_http}"
-        party_ids = wait_for_parties(ledger_url, parties, proc, log_path, args.canton_timeout)
+        placements_with_urls = [(name, participant_urls[index - 1]) for name, index in placements]
+        party_ids = wait_for_parties(placements_with_urls, proc, log_path, args.canton_timeout)
         print("Canton ready: " + ", ".join(f"{name}={short_party(pid)}" for name, pid in party_ids.items()))
 
         env = daml_child_env({
-            "DPM_TRACE_IT_LEDGER": ledger_url,
+            "DPM_TRACE_IT_LEDGER": participant_urls[0],
             "DPM_TRACE_IT_DAR": dar,
             "DPM_TRACE_IT_DAML": str(Path(daml).expanduser()),
             "DPM_TRACE_IT_DAML_YAML": str(root / "daml.yaml"),
             "DPM_TRACE_IT_SRC": str(Path(__file__).resolve().parents[1]),
             "DPM_TRACE_IT_PYTHON": sys.executable,
         })
+        for index in range(2, num_participants + 1):
+            env[f"DPM_TRACE_IT_LEDGER{index}"] = participant_urls[index - 1]
         for name, pid in party_ids.items():
             env[f"DPM_TRACE_IT_{name.upper()}"] = pid
 
@@ -527,7 +537,39 @@ def find_free_ports(count: int) -> list[int]:
             sock.close()
 
 
-def canton_config_text(seq_pub: int, seq_admin: int, med_admin: int, p_admin: int, p_ledger: int, p_http: int) -> str:
+def parse_party_placements(parties_arg: str) -> list[tuple[str, int]]:
+    """Parse `Alice,Bob@2` into [("Alice", 1), ("Bob", 2)] -- party -> participant index."""
+    placements: list[tuple[str, int]] = []
+    for token in parties_arg.split(","):
+        name, _, index_text = token.strip().partition("@")
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            index = int(index_text) if index_text else 1
+        except ValueError:
+            index = 1
+        placements.append((name, max(index, 1)))
+    return placements
+
+
+def canton_config_text(
+    seq_pub: int,
+    seq_admin: int,
+    med_admin: int,
+    participant_ports: list[tuple[int, int, int]],
+) -> str:
+    blocks = []
+    for index, (p_admin, p_ledger, p_http) in enumerate(participant_ports, start=1):
+        blocks.append(
+            f"    participant{index} {{\n"
+            f"      storage.type = memory\n"
+            f"      admin-api.port = {p_admin}\n"
+            f"      ledger-api.port = {p_ledger}\n"
+            f"      http-ledger-api.port = {p_http}\n"
+            f"    }}"
+        )
+    participants = "\n".join(blocks)
     return f"""canton {{
   sequencers {{
     sequencer1 {{
@@ -544,57 +586,53 @@ def canton_config_text(seq_pub: int, seq_admin: int, med_admin: int, p_admin: in
     }}
   }}
   participants {{
-    participant1 {{
-      storage.type = memory
-      admin-api.port = {p_admin}
-      ledger-api.port = {p_ledger}
-      http-ledger-api.port = {p_http}
-    }}
+{participants}
   }}
 }}
 """
 
 
-def canton_bootstrap_text(dar: str, parties: list[str]) -> str:
-    lines = [
-        "nodes.local.start()",
-        "bootstrap.synchronizer_local()",
-        'participant1.synchronizers.connect_local(sequencer1, alias = "da")',
-        'utils.retry_until_true { participant1.synchronizers.active("da") }',
-        f'participant1.dars.upload("{dar}")',
-    ]
-    lines += [f'participant1.parties.enable("{party}")' for party in parties]
+def canton_bootstrap_text(dar: str, placements: list[tuple[str, int]], num_participants: int) -> str:
+    lines = ["nodes.local.start()", "bootstrap.synchronizer_local()"]
+    for index in range(1, num_participants + 1):
+        lines.append(f'participant{index}.synchronizers.connect_local(sequencer1, alias = "da")')
+    active = " && ".join(f'participant{index}.synchronizers.active("da")' for index in range(1, num_participants + 1))
+    lines.append("utils.retry_until_true { " + active + " }")
+    lines.append(f'participants.all.dars.upload("{dar}")')
+    for name, index in placements:
+        lines.append(f'participant{index}.parties.enable("{name}")')
     lines.append('println("=== dpm-trace integration ready ===")')
     return "\n".join(lines) + "\n"
 
 
 def wait_for_parties(
-    ledger_url: str,
-    party_hints: list[str],
+    placements: list[tuple[str, str]],
     proc: "subprocess.Popen[bytes]",
     log_path: Path,
     timeout: int,
 ) -> dict[str, str]:
-    parties_url = join_url(ledger_url, "/v2/parties")
+    """placements: [(party-name, that participant's ledger url)]."""
     deadline = time.monotonic() + max(timeout, 1)
     last_error: str | None = None
+    found: dict[str, str] = {}
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(
                 f"Canton exited during startup (code {proc.returncode}):\n{read_tail(log_path, 40)}"
             )
         try:
-            data = http_json("GET", parties_url)
-            details = data.get("partyDetails") if isinstance(data, dict) else None
-            found: dict[str, str] = {}
-            if isinstance(details, list):
-                for hint in party_hints:
+            for name, ledger_url in placements:
+                if name in found:
+                    continue
+                data = http_json("GET", join_url(ledger_url, "/v2/parties"))
+                details = data.get("partyDetails") if isinstance(data, dict) else None
+                if isinstance(details, list):
                     for detail in details:
                         party = str(detail.get("party", ""))
-                        if party.startswith(hint + "::"):
-                            found[hint] = party
+                        if party.startswith(name + "::"):
+                            found[name] = party
                             break
-            if all(hint in found for hint in party_hints):
+            if len(found) == len(placements):
                 # Parties exist on the Ledger API, but their topology can take a
                 # moment to become effective on the synchronizer (otherwise a
                 # submission naming a fresh informee fails with UNKNOWN_INFORMEES).
@@ -637,25 +675,33 @@ def build_dar(root: Path, daml: str) -> str:
 
 def run_init(args: argparse.Namespace) -> int:
     root = resolve_package_root(args)
-    if not (root / "daml.yaml").exists():
+    daml_yaml = root / "daml.yaml"
+    if not daml_yaml.exists():
         print(f"error: {root} is not a Daml package (no daml.yaml found)", file=sys.stderr)
         return 2
-    itests = root / (getattr(args, "itests_dir", None) or "itests")
-    itests.mkdir(parents=True, exist_ok=True)
     color = Color.from_mode(getattr(args, "color", "auto"))
-
     created: list[Path] = []
     skipped: list[Path] = []
-    for name, text in (
-        ("lit.cfg.py", integration_lit_cfg_text()),
-        ("example.test", integration_example_test_text()),
-    ):
-        path = itests / name
+
+    def scaffold(path: Path, text: str) -> None:
         if path.exists():
             skipped.append(path)
-        else:
-            path.write_text(text, encoding="utf-8")
-            created.append(path)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        created.append(path)
+
+    itests = root / (getattr(args, "itests_dir", None) or "itests")
+    scaffold(itests / "lit.cfg.py", integration_lit_cfg_text())
+    scaffold(itests / "example.test", integration_example_test_text())
+
+    unittests_name = getattr(args, "unittests_dir", None) or "unittests"
+    if not getattr(args, "no_unittests", False):
+        sdk_version = read_daml_yaml_field(daml_yaml, "sdk-version") or "3.4.11"
+        package_name = read_daml_yaml_field(daml_yaml, "name") or "app"
+        unit = root / unittests_name
+        scaffold(unit / "daml.yaml", unit_test_daml_yaml_text(package_name, sdk_version))
+        scaffold(unit / "daml" / "Example.daml", unit_test_example_text())
 
     print(color.apply("dpm trace test --init", "bold"))
     print(f"  package: {root}")
@@ -665,10 +711,70 @@ def run_init(args: argparse.Namespace) -> int:
         print("  " + color.apply("kept", "gray") + f"     {path.relative_to(root)} (already exists)")
     print("")
     print("Next steps:")
-    print("  unit tests:        " + color.apply("dpm trace test .", "cyan"))
+    print(f"  unit tests:        " + color.apply(f"dpm trace test {unittests_name}", "cyan")
+          + " (self-contained package; or `dpm trace test .` for this package's scripts)")
     print(f"  integration tests: " + color.apply(f"dpm trace test . --integration {itests.name} --canton-jar <canton.jar>", "cyan"))
-    print(f"  (edit {itests.name}/example.test to add your first integration test)")
     return 0
+
+
+def read_daml_yaml_field(path: Path, field: str) -> str | None:
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        match = re.match(rf"\s*{re.escape(field)}\s*:\s*(.+?)\s*$", line)
+        if match:
+            return strip_yaml_scalar(match.group(1))
+    return None
+
+
+def unit_test_daml_yaml_text(package_name: str, sdk_version: str) -> str:
+    return f"""sdk-version: {sdk_version}
+name: {package_name}-unittests
+source: daml
+version: 1.0.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+# To test the package under test, build it and add its DAR here:
+# data-dependencies:
+#   - ../.daml/dist/{package_name}-1.0.0.dar
+"""
+
+
+def unit_test_example_text() -> str:
+    return '''-- Unit test package scaffolded by `dpm trace test --init`.
+-- Run with:  dpm trace test unittests
+--
+-- This is self-contained. To test your own templates, add the package under
+-- test as a data-dependency in daml.yaml and import its modules here.
+module Example where
+
+import Daml.Script
+import DA.Assert ((===))
+
+template Box
+  with
+    owner : Party
+    value : Int
+  where
+    signatory owner
+    ensure value >= 0
+
+testBoxHoldsValue : Script ()
+testBoxHoldsValue = do
+  alice <- allocateParty "Alice"
+  cid <- submit alice do createCmd Box with owner = alice; value = 5
+  Some box <- queryContractId alice cid
+  box.value === 5
+
+testBoxRejectsNegative : Script ()
+testBoxRejectsNegative = do
+  alice <- allocateParty "Alice"
+  submitMustFail alice do createCmd Box with owner = alice; value = -1
+'''
 
 
 def integration_lit_cfg_text() -> str:
@@ -701,6 +807,8 @@ config.environment["PYTHONPATH"] = os.environ.get("DPM_TRACE_IT_SRC", "")
 
 config.substitutions.append(("%daml-yaml", os.environ.get("DPM_TRACE_IT_DAML_YAML", "")))
 config.substitutions.append(("%damlc", os.environ.get("DPM_TRACE_IT_DAML", "daml")))
+# %ledger2 must precede %ledger -- otherwise "%ledger" matches inside "%ledger2".
+config.substitutions.append(("%ledger2", os.environ.get("DPM_TRACE_IT_LEDGER2", "")))
 config.substitutions.append(("%ledger", ledger))
 config.substitutions.append(("%alice", os.environ.get("DPM_TRACE_IT_ALICE", "")))
 config.substitutions.append(("%bob", os.environ.get("DPM_TRACE_IT_BOB", "")))
@@ -1090,7 +1198,7 @@ def run_trace(args: argparse.Namespace) -> int:
     try:
         update_id = extract_update_id(args.target)
         parties = parse_parties(args.read_as + args.party)
-        raw, source, source_url = load_update(args, update_id, parties)
+        raw, source, source_url = load_update_with_wait(args, update_id, parties)
         trace = normalize_trace(raw, source=source, source_url=source_url, parties=parties)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -2331,6 +2439,26 @@ def config_values(value: Any) -> list[str]:
     if value is None:
         return []
     return [str(value)]
+
+
+def load_update_with_wait(
+    args: argparse.Namespace,
+    update_id: str | None,
+    parties: list[str],
+) -> tuple[dict[str, Any], str, str | None]:
+    wait = float(getattr(args, "wait", 0.0) or 0.0)
+    if wait <= 0:
+        return load_update(args, update_id, parties)
+    # Retry while the update is not yet visible (e.g. a second participant is
+    # still ingesting the committed transaction from the synchronizer).
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            return load_update(args, update_id, parties)
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
 
 
 def load_update(

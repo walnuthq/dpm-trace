@@ -249,20 +249,35 @@ workflow, and a regression demo — lives in the sibling `daml-tests` package.
 Unit tests run on the in-memory IDE ledger. For integration tests against a
 **real local Canton node**, point `test` at an `lit` suite with `--integration`.
 
-Scaffold the suite once with `--init` (writes `itests/lit.cfg.py` and a sample
-test into the package):
+Scaffold the test layout once with `--init` — it writes `itests/` (the lit
+integration suite) and a self-contained `unittests/` package:
 
 ```bash
 dpm trace test . --init
+#   created itests/lit.cfg.py, itests/example.test
+#   created unittests/daml.yaml, unittests/daml/Example.daml
 ```
 
-Then run it:
+Then run the integration suite:
 
 ```bash
 dpm trace test . --integration itests \
   --canton-jar "$DPM_TRACE_CANTON_JAR" \
   --daml daml
 ```
+
+**Multiple participants.** `--parties` places parties on participants with
+`Name@N`, and the harness provisions that many participant nodes:
+
+```bash
+dpm trace test . --integration itests --canton-jar "$DPM_TRACE_CANTON_JAR" \
+  --parties Alice@1,Bob@2
+```
+
+Tests then reach the second participant via `%ledger2`. Because a committed
+update reaches the other participant asynchronously, trace it with `--wait <s>`
+(retries until it is visible). See `daml-tests/itests/asset-issue-to-bob.test`
+for a cross-participant example.
 
 This builds the package DAR, boots an in-memory Canton on random ports, uploads
 the DAR, allocates parties (default `Alice,Bob`), then runs `lit` over the test
