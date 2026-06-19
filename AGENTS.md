@@ -14,9 +14,13 @@ Command surface:
 - `dpm trace --command-id <id>` / `--completion-file <file>`: inspect a failed submission through completion data.
 - `dpm trace open <artifact>`: reopen an exported trace artifact.
 - `dpm trace prepare`: prepare a transaction without committing it.
+- `dpm trace submit`: submit-and-wait a command and print the update id (integration-test primitive).
 - `dpm trace compare`: compare prepared transactions, successful transactions, or completion data.
-- `dpm trace test`: run Daml Script unit tests, render their transaction trees, and map failed tests to source.
+- `dpm trace test`: run Daml Script unit tests (unit mode) or an lit suite against a managed local Canton (`--integration`).
 - `dpm trace ... --visualize`: open the interactive CLI visualizer.
+
+`main()` strips a leading `trace` arg, so `dpm_trace.cli trace <id>` behaves like
+the plugin's `dpm trace <id>`.
 
 ## Code layout
 
@@ -31,7 +35,9 @@ Key areas to orient in the file:
 - Failed submissions / completions: `fetch_completion_by_command_id`, `normalize_completion`, `print_completion_trace`.
 - Source mapping: `SourceIndex` (loads `daml.yaml` sources and, with `--dar`, `damlc inspect`), `completion_source_needles`, `render_source_diagnostic`.
 - Test runner (`dpm trace test`): `test_main` → `run_test` → `daml_test_command`, `parse_junit`, `transaction_html_to_text`, `transaction_stats`, `test_failure_locations`, `print_test_report` / `test_report_json`.
-- Spawning daml/damlc: `daml_child_env()`.
+- Integration runner (`--integration`): `run_integration_tests` boots a local Canton (`canton_config_text`, `canton_bootstrap_text`, `find_free_ports`, `wait_for_parties`, `build_dar`), exports `DPM_TRACE_IT_*` env, runs `lit`, tears down.
+- Submit primitive (`dpm trace submit`): `submit_main` → `run_submit` (submit-and-wait, prints the update id).
+- Spawning daml/damlc/canton: `daml_child_env()` (drops `DPM_RESOLUTION_FILE`, forces a UTF-8 locale).
 
 A worked example package for the test runner (Asset contract + Script tests +
 CI workflow + regression demo) lives in the sibling `daml-tests` directory.

@@ -8,8 +8,9 @@ It demonstrates the proposal surface:
 - `trace --command-id`: inspect a failed submission through completion data.
 - `open`: reopen an exported trace artifact.
 - `prepare`: prepare a command without committing it.
+- `submit`: submit a command (submit-and-wait) and print the resulting update id.
 - `compare`: compare prepared transactions, successful transactions, or completions.
-- `test`: run Daml Script unit tests, render their transaction trees, and map failed tests to source.
+- `test`: run Daml Script unit tests (unit mode) or an lit suite against a managed local Canton (integration mode).
 
 ## Setup
 
@@ -242,6 +243,54 @@ dpm trace test . --dar .daml/dist/<pkg>.dar --junit results.xml --no-trees
 
 A worked example — an Asset contract, a Daml Script test suite, a GitHub Actions
 workflow, and a regression demo — lives in the sibling `daml-tests` package.
+
+### Integration tests (managed Canton + lit)
+
+Unit tests run on the in-memory IDE ledger. For integration tests against a
+**real local Canton node**, point `test` at an `lit` suite with `--integration`:
+
+```bash
+dpm trace test . --integration itests \
+  --canton-jar "$DPM_TRACE_CANTON_JAR" \
+  --daml daml
+```
+
+This builds the package DAR, boots an in-memory Canton on random ports, uploads
+the DAR, allocates parties (default `Alice,Bob`), then runs `lit` over the test
+directory against the live node and tears Canton down. One boot serves the whole
+suite, and the lit exit code gates CI.
+
+Connection details are exposed to tests as `lit` substitutions: `%dpm`
+(the CLI), `%ledger` (the participant JSON Ledger API URL), `%alice`, `%bob`,
+and `%dar`. A test submits against the live ledger and asserts on the trace:
+
+```
+# REQUIRES: canton
+# RUN: ID=$(%dpm submit --submitter %ledger --act-as %alice \
+# RUN:        --template '#asset-tests:Asset:Asset' \
+# RUN:        --arg issuer=%alice --arg owner=%alice --arg name=GOLD --arg quantity=100) \
+# RUN:   && %dpm trace "$ID" --submitter %ledger --read-as %alice --color never | FileCheck %s
+# CHECK: CREATE Asset:Asset
+# CHECK: name: GOLD{{.*}}quantity: 100
+```
+
+It needs a Canton jar (`--canton-jar` or `DPM_TRACE_CANTON_JAR`), plus `lit` and
+`FileCheck` on PATH. See `daml-tests/itests/` for a working suite.
+
+## Submit
+
+Submit a command to a participant (submit-and-wait) and print the update id —
+the primitive integration tests use to create state and then trace it:
+
+```bash
+dpm trace submit \
+  --submitter http://localhost:<json-ledger-api-port> \
+  --act-as '<party-id>' \
+  --template '#<package-name>:Mod:Template' \
+  --arg owner='<party-id>' --arg count=0
+```
+
+Use `--print-json` for the full submit-and-wait response.
 
 ## Failed submission source demo
 

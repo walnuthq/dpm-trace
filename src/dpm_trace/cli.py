@@ -6,10 +6,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -24,6 +26,7 @@ SCAN_UPDATE_PATH = "/v2/updates/{update_id}"
 LEDGER_UPDATE_BY_ID_PATH = "/v2/updates/update-by-id"
 LEDGER_ACTIVE_CONTRACTS_PATH = "/v2/state/active-contracts"
 LEDGER_INTERACTIVE_PREPARE_PATH = "/v2/interactive-submission/prepare"
+LEDGER_SUBMIT_AND_WAIT_PATH = "/v2/commands/submit-and-wait"
 LEDGER_COMPLETIONS_PATH = "/v2/commands/completions"
 TRACE_ARTIFACT_SCHEMA = "dpm-trace/trace-artifact/v0"
 PREPARED_ARTIFACT_SCHEMA = "dpm-trace/prepared-artifact/v0"
@@ -91,12 +94,18 @@ class ExpressionStep:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # The DPM plugin invokes us without the "trace" command name; accept an
+    # explicit leading "trace" too so `dpm_trace.cli trace <id>` works directly.
+    if argv and argv[0] == "trace":
+        argv = argv[1:]
     if argv and argv[0] == "open":
         return open_main(argv[1:])
     if argv and argv[0] == "prepare":
         return prepare_main(argv[1:])
     if argv and argv[0] == "compare":
         return compare_main(argv[1:])
+    if argv and argv[0] == "submit":
+        return submit_main(argv[1:])
     if argv and argv[0] == "test":
         return test_main(argv[1:])
 
@@ -205,6 +214,64 @@ def prepare_main(argv: list[str]) -> int:
         return 1
 
 
+def submit_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm trace submit",
+        description="Submit a command to a participant (submit-and-wait) and print the resulting update id.",
+        epilog="Intended for integration tests: ID=$(dpm trace submit ... --template '#pkg:Mod:T' --arg owner=$P)",
+    )
+    add_common_connection_args(parser)
+    parser.add_argument("--commands", help="JSON file containing a commands array or an object with a commands field.")
+    parser.add_argument("--command-json", help="Raw JSON command envelope or commands array.")
+    parser.add_argument("--act-as", action="append", default=[], help="Submitting party. Repeatable.")
+    parser.add_argument("--template", help="Template id for an explicit command, e.g. '#pkg:Mod:T'.")
+    parser.add_argument("--choice", help="Choice name for an explicit exercise command.")
+    parser.add_argument("--contract-id", help="Contract id for an explicit exercise command.")
+    parser.add_argument("--args-json", help="JSON object/value to use as create arguments or choice argument.")
+    parser.add_argument("--args-file", help="File containing JSON arguments.")
+    parser.add_argument("--arg", action="append", default=[], help="Set one argument field, e.g. --arg count=1. Repeatable.")
+    parser.add_argument("--command-id", help="Command id. Defaults to dpm-trace-submit-<uuid>.")
+    parser.add_argument("--user-id", help="Ledger API user id for the submission.")
+    parser.add_argument("--print-json", action="store_true", help="Print the full submit-and-wait response.")
+    args = parser.parse_args(argv)
+    try:
+        return run_submit(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def run_submit(args: argparse.Namespace) -> int:
+    apply_config_defaults(args, load_config(args.config))
+    commands = prepare_commands(args)
+    act_as = parse_parties(args.act_as)
+    if not act_as:
+        raise ValueError("--act-as is required")
+    read_as = [party for party in parse_parties(args.read_as + args.party) if party not in act_as]
+    ledger_url = participant_ledger_url(args)
+    token = args.token or read_token_file(args.token_file)
+    request: dict[str, Any] = {
+        "commandId": args.command_id or f"dpm-trace-submit-{uuid4().hex[:12]}",
+        "commands": commands,
+        "actAs": act_as,
+        "readAs": read_as,
+    }
+    user_id = prepare_user_id(args) if not args.user_id else args.user_id
+    if user_id:
+        request["userId"] = user_id
+
+    url = join_url(ledger_url, LEDGER_SUBMIT_AND_WAIT_PATH)
+    response = http_json("POST", url, body=request, token=token)
+    if args.print_json:
+        print(json.dumps(response, indent=2, sort_keys=True))
+        return 0
+    update_id = response.get("updateId") if isinstance(response, dict) else None
+    if not update_id:
+        raise ValueError(f"submit-and-wait returned no updateId: {response}")
+    print(update_id)
+    return 0
+
+
 def compare_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="dpm trace compare",
@@ -270,6 +337,12 @@ def test_main(argv: list[str]) -> int:
     parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--config", help="Trace config JSON. Defaults to .dpm-trace.json found in the current directory or a parent.")
     parser.add_argument("--color", choices=["auto", "always", "never"], default="auto")
+    # Integration mode: run an lit suite against a managed local Canton node.
+    parser.add_argument("--integration", metavar="DIR", help="Run an lit integration suite against a managed local Canton node instead of unit tests.")
+    parser.add_argument("--canton-jar", help="Canton jar for --integration. Defaults to $DPM_TRACE_CANTON_JAR.")
+    parser.add_argument("--lit", help="lit executable for --integration. Defaults to lit.")
+    parser.add_argument("--parties", help="Comma-separated parties to allocate for --integration. Defaults to Alice,Bob.")
+    parser.add_argument("--canton-timeout", type=int, default=180, help="Seconds to wait for Canton readiness. Defaults to 180.")
     args = parser.parse_args(argv)
     try:
         return run_test(args)
@@ -280,6 +353,8 @@ def test_main(argv: list[str]) -> int:
 
 def run_test(args: argparse.Namespace) -> int:
     apply_config_defaults(args, load_config(getattr(args, "config", None)))
+    if getattr(args, "integration", None):
+        return run_integration_tests(args)
     color = Color.from_mode(args.color)
     root = resolve_package_root(args)
     daml_yaml = root / "daml.yaml"
@@ -354,6 +429,193 @@ def run_test(args: argparse.Namespace) -> int:
                 print(f"\nartifacts kept in: {work}")
         else:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def run_integration_tests(args: argparse.Namespace) -> int:
+    test_dir = Path(args.integration).expanduser().resolve()
+    if not test_dir.exists():
+        print(f"error: integration test dir not found: {test_dir}", file=sys.stderr)
+        return 2
+    root = resolve_package_root(args)
+    daml = args.daml or "daml"
+    canton_jar = args.canton_jar or os.environ.get("DPM_TRACE_CANTON_JAR")
+    if not canton_jar or not Path(canton_jar).expanduser().exists():
+        print("error: --canton-jar (or DPM_TRACE_CANTON_JAR) must point at a Canton jar", file=sys.stderr)
+        return 2
+    lit = args.lit or "lit"
+    parties = [p.strip() for p in (args.parties or "Alice,Bob").split(",") if p.strip()]
+
+    dar = args.dar[0] if getattr(args, "dar", None) else None
+    if not dar:
+        print("building DAR ...")
+        dar = build_dar(root, daml)
+    dar = str(Path(dar).expanduser().resolve())
+
+    work = Path(tempfile.mkdtemp(prefix="dpm-trace-itest-"))
+    log_path = work / "canton.log"
+    proc = None
+    try:
+        seq_pub, seq_admin, med_admin, p_admin, p_ledger, p_http = find_free_ports(6)
+        (work / "canton.conf").write_text(canton_config_text(seq_pub, seq_admin, med_admin, p_admin, p_ledger, p_http))
+        (work / "bootstrap.canton").write_text(canton_bootstrap_text(dar, parties))
+
+        print(f"booting local Canton (participant JSON API :{p_http}); deploying {Path(dar).name} ...")
+        with open(log_path, "wb") as log_fh:
+            proc = subprocess.Popen(
+                ["java", "-jar", str(Path(canton_jar).expanduser()), "daemon",
+                 "-c", str(work / "canton.conf"), "--bootstrap", str(work / "bootstrap.canton"), "--no-tty"],
+                stdout=log_fh, stderr=subprocess.STDOUT, cwd=str(work), env=daml_child_env(),
+            )
+        ledger_url = f"http://127.0.0.1:{p_http}"
+        party_ids = wait_for_parties(ledger_url, parties, proc, log_path, args.canton_timeout)
+        print("Canton ready: " + ", ".join(f"{name}={short_party(pid)}" for name, pid in party_ids.items()))
+
+        env = daml_child_env({
+            "DPM_TRACE_IT_LEDGER": ledger_url,
+            "DPM_TRACE_IT_DAR": dar,
+            "DPM_TRACE_IT_SRC": str(Path(__file__).resolve().parents[1]),
+            "DPM_TRACE_IT_PYTHON": sys.executable,
+        })
+        for name, pid in party_ids.items():
+            env[f"DPM_TRACE_IT_{name.upper()}"] = pid
+
+        print(f"running integration suite: {test_dir}\n")
+        result = subprocess.run([lit, str(test_dir), "-v"], env=env)
+        return result.returncode
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if getattr(args, "keep_artifacts", False):
+            print(f"\nkept Canton log + config: {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def find_free_ports(count: int) -> list[int]:
+    socks: list[socket.socket] = []
+    try:
+        ports: list[int] = []
+        for _ in range(count):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            ports.append(sock.getsockname()[1])
+            socks.append(sock)
+        return ports
+    finally:
+        for sock in socks:
+            sock.close()
+
+
+def canton_config_text(seq_pub: int, seq_admin: int, med_admin: int, p_admin: int, p_ledger: int, p_http: int) -> str:
+    return f"""canton {{
+  sequencers {{
+    sequencer1 {{
+      storage.type = memory
+      public-api.port = {seq_pub}
+      admin-api.port = {seq_admin}
+      sequencer.type = BFT
+    }}
+  }}
+  mediators {{
+    mediator1 {{
+      storage.type = memory
+      admin-api.port = {med_admin}
+    }}
+  }}
+  participants {{
+    participant1 {{
+      storage.type = memory
+      admin-api.port = {p_admin}
+      ledger-api.port = {p_ledger}
+      http-ledger-api.port = {p_http}
+    }}
+  }}
+}}
+"""
+
+
+def canton_bootstrap_text(dar: str, parties: list[str]) -> str:
+    lines = [
+        "nodes.local.start()",
+        "bootstrap.synchronizer_local()",
+        'participant1.synchronizers.connect_local(sequencer1, alias = "da")',
+        'utils.retry_until_true { participant1.synchronizers.active("da") }',
+        f'participant1.dars.upload("{dar}")',
+    ]
+    lines += [f'participant1.parties.enable("{party}")' for party in parties]
+    lines.append('println("=== dpm-trace integration ready ===")')
+    return "\n".join(lines) + "\n"
+
+
+def wait_for_parties(
+    ledger_url: str,
+    party_hints: list[str],
+    proc: "subprocess.Popen[bytes]",
+    log_path: Path,
+    timeout: int,
+) -> dict[str, str]:
+    parties_url = join_url(ledger_url, "/v2/parties")
+    deadline = time.monotonic() + max(timeout, 1)
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"Canton exited during startup (code {proc.returncode}):\n{read_tail(log_path, 40)}"
+            )
+        try:
+            data = http_json("GET", parties_url)
+            details = data.get("partyDetails") if isinstance(data, dict) else None
+            found: dict[str, str] = {}
+            if isinstance(details, list):
+                for hint in party_hints:
+                    for detail in details:
+                        party = str(detail.get("party", ""))
+                        if party.startswith(hint + "::"):
+                            found[hint] = party
+                            break
+            if all(hint in found for hint in party_hints):
+                # Parties exist on the Ledger API, but their topology can take a
+                # moment to become effective on the synchronizer (otherwise a
+                # submission naming a fresh informee fails with UNKNOWN_INFORMEES).
+                time.sleep(3.0)
+                return found
+        except Exception as exc:  # noqa: BLE001 - readiness polling tolerates any error
+            last_error = str(exc)
+        time.sleep(1.0)
+    raise RuntimeError(f"Canton did not become ready within {timeout}s (last error: {last_error})")
+
+
+def read_tail(path: Path, lines: int) -> str:
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(content[-lines:])
+
+
+def build_dar(root: Path, daml: str) -> str:
+    executable = str(Path(daml).expanduser())
+    name = Path(executable).name
+    command = [executable, "build"]
+    if name == "damlc":
+        command = [executable, "build", "--package-root", str(root)]
+    elif name == "daml":
+        command.append("--no-legacy-assistant-warning")
+    completed = subprocess.run(
+        command, cwd=str(root), env=daml_child_env({"DAML_PACKAGE": str(root)}),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"daml build failed:\n{completed.stdout}")
+    dist = root / ".daml" / "dist"
+    dars = sorted(dist.glob("*.dar")) if dist.exists() else []
+    if not dars:
+        raise RuntimeError(f"daml build produced no DAR in {dist}")
+    return str(max(dars, key=lambda path: path.stat().st_mtime))
 
 
 def resolve_package_root(args: argparse.Namespace) -> Path:
