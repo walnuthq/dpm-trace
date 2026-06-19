@@ -9,6 +9,7 @@ It demonstrates the proposal surface:
 - `open`: reopen an exported trace artifact.
 - `prepare`: prepare a command without committing it.
 - `compare`: compare prepared transactions, successful transactions, or completions.
+- `test`: run Daml Script unit tests, render their transaction trees, and map failed tests to source.
 
 ## Setup
 
@@ -167,6 +168,81 @@ dpm trace compare \
   --completion-file completion.json
 ```
 
+## Test (Daml Script unit tests)
+
+Run a package's Daml Script unit tests, render each script's transaction tree,
+and map any failed test back to source. It wraps `daml test` on the in-memory
+IDE ledger, so it needs **no Canton node** and runs locally in CI/CD.
+
+```bash
+dpm trace test <package-dir> --daml daml
+```
+
+`daml test` already runs the tests and gates CI by exit code. `dpm trace test`
+adds what it does not:
+
+- **Failure triage.** A red test is resolved to source and rendered with a caret
+  — both the test call site *and* the contract invariant (`assertMsg` / `abort` /
+  `ensure`) that rejected it. With `--dar`, the contract match is verified against
+  the compiled package using `damlc inspect`, not just grepped from local files.
+- **Transaction trees in the terminal and as JSON.** `daml test` only writes these
+  to IDE-only HTML; here they appear inline and in `--print-json`.
+- **A structured report** to build CI automation on (PR comments, custom gates).
+
+### Usage
+
+```bash
+dpm trace test .                  # run all Script tests in the current package
+dpm trace test . --no-trees       # summary + failures only (compact CI logs)
+dpm trace test . --print-json     # machine-readable report (dpm-trace/test-report/v0)
+dpm trace test . --junit out.xml  # also write JUnit XML for CI
+dpm trace test . -p testSplit     # run a subset by test pattern
+dpm trace test . --dar .daml/dist/<pkg>.dar   # damlc-inspect-verified failure mapping
+```
+
+`--daml` selects the toolchain (`daml`, `damlc`, or `dpm`) and defaults to `daml`.
+
+### Output
+
+A passing run renders each script's decoded transaction tree and a per-test summary:
+
+```
+DPM trace test
+  package:  daml-tests
+  command:  daml test
+  result:   all 7 passed (7 total)
+
+Results
+  PASS  testTransfer         2 tx  +2 create  >1 exercise  x1 archive
+  PASS  testSplit            2 tx  +3 create  >1 exercise  x1 archive
+  PASS  testCannotIssueZero  1 tx  !1 expected-fail
+  ...
+```
+
+A failing run pinpoints the source and returns a non-zero exit code. When a
+contract guard rejects a submission, the report shows both where the test failed
+and why:
+
+```
+  FAIL  testSplitContractGuard
+        message: ... AssertionFailed: splitQuantity must be between 1 and quantity - 1 ...
+        daml/Test.daml:14:8      basis: daml test: Test        (where the test failed)
+        daml/Asset.daml:37:20    basis: damlc inspect: Asset   (the invariant that rejected it)
+        > 37 |   assertMsg "splitQuantity must be between 1 and quantity - 1"
+                          ^
+```
+
+### CI
+
+The command exits non-zero on any failure, so a CI step is a single line:
+
+```bash
+dpm trace test . --dar .daml/dist/<pkg>.dar --junit results.xml --no-trees
+```
+
+A worked example — an Asset contract, a Daml Script test suite, a GitHub Actions
+workflow, and a regression demo — lives in the sibling `daml-tests` package.
+
 ## Failed submission source demo
 
 This fixture shows the CI-style path: consume a captured completion/error JSON,
@@ -197,6 +273,15 @@ Inspect-backed source diagnostic test:
 DPM_TRACE_RUN_DAMLC_INSPECT=1 \
 DPM_TRACE_DAMLC=daml \
 lit tests/completion-source-inspect.test
+```
+
+Opt-in Daml Script test-runner integration test (uses a real Daml toolchain
+against the sibling `daml-tests` package):
+
+```bash
+DPM_TRACE_RUN_DAML_TEST=1 \
+DPM_TRACE_DAML=daml \
+lit tests/daml-script-test.test
 ```
 
 Opt-in local Canton integration test:

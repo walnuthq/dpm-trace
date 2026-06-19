@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
         return prepare_main(argv[1:])
     if argv and argv[0] == "compare":
         return compare_main(argv[1:])
+    if argv and argv[0] == "test":
+        return test_main(argv[1:])
 
     parser = build_trace_parser()
     args = parser.parse_args(argv)
@@ -224,6 +230,412 @@ def compare_main(argv: list[str]) -> int:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+@dataclass
+class TestCaseResult:
+    name: str
+    classname: str
+    status: str
+    message: str | None = None
+    time: float | None = None
+    transactions_text: str | None = None
+    stats: dict[str, int] = field(default_factory=dict)
+    touched_locations: list[str] = field(default_factory=list)
+    diagnostics: list[SourceLocation] = field(default_factory=list)
+
+
+def test_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm trace test",
+        description="Run Daml Script unit tests and render source-mapped trace results.",
+        epilog=(
+            "Runs `daml test` on a Daml package, decodes each script's transaction tree, "
+            "and maps failed tests back to source. Returns a non-zero exit code when any "
+            "test fails, so it works as a CI gate."
+        ),
+    )
+    parser.add_argument("package_root", nargs="?", help="Daml package directory containing daml.yaml. Defaults to the current directory.")
+    parser.add_argument("--daml", help="Daml assistant, damlc, or dpm executable used to run the tests. Defaults to daml.")
+    parser.add_argument("--files", action="append", default=[], help="Restrict the run to these .daml files. Repeatable.")
+    parser.add_argument("-p", "--test-pattern", dest="test_pattern", help="Only run test declarations matching this pattern.")
+    parser.add_argument("--junit", help="Also copy the JUnit XML result to this path for CI consumption.")
+    parser.add_argument("--no-trees", action="store_true", help="Suppress transaction-tree rendering; show the summary and failures only.")
+    parser.add_argument("--keep-artifacts", action="store_true", help="Keep the temporary directory with JUnit/transaction/table outputs.")
+    parser.add_argument("--print-json", action="store_true", help="Print a machine-readable test report and exit.")
+    parser.add_argument("--dar", action="append", default=[], help="Built DAR used to verify failure text via damlc inspect. Repeatable.")
+    parser.add_argument("--damlc", help="damlc/daml executable for inspect verification. Defaults to --daml.")
+    parser.add_argument("--daml-yaml", action="append", default=[], help="Override the daml.yaml used for source diagnostics. Repeatable.")
+    parser.add_argument("--source-root", action="append", default=[], help="Extra Daml source roots for diagnostics. Repeatable.")
+    parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--config", help="Trace config JSON. Defaults to .dpm-trace.json found in the current directory or a parent.")
+    parser.add_argument("--color", choices=["auto", "always", "never"], default="auto")
+    args = parser.parse_args(argv)
+    try:
+        return run_test(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def run_test(args: argparse.Namespace) -> int:
+    apply_config_defaults(args, load_config(getattr(args, "config", None)))
+    color = Color.from_mode(args.color)
+    root = resolve_package_root(args)
+    daml_yaml = root / "daml.yaml"
+    if not daml_yaml.exists():
+        print(f"error: no daml.yaml found in {root}; pass a package directory", file=sys.stderr)
+        return 2
+    if not getattr(args, "daml_yaml", None):
+        args.daml_yaml = [str(daml_yaml)]
+    if not getattr(args, "damlc", None):
+        args.damlc = args.daml
+
+    work = Path(tempfile.mkdtemp(prefix="dpm-trace-test-"))
+    junit_path = work / "results.xml"
+    txns_dir = work / "transactions"
+    table_dir = work / "tables"
+    try:
+        command, env = daml_test_command(args, root, junit_path, txns_dir, table_dir)
+        completed = subprocess.run(
+            command,
+            cwd=str(root),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if not junit_path.exists():
+            sys.stderr.write(completed.stdout or "")
+            print(
+                f"\nerror: '{' '.join(display_command(command))}' produced no test results "
+                f"(exit {completed.returncode}); the package may not compile",
+                file=sys.stderr,
+            )
+            return 2
+
+        cases = parse_junit(junit_path)
+        source_index = source_index_from_args(args, None)
+        for case in cases:
+            if case.status == "passed":
+                html_file = txns_dir / f"transaction-{case.name}.html"
+                if html_file.exists():
+                    case.transactions_text = transaction_html_to_text(html_file.read_text(encoding="utf-8", errors="replace"))
+                    case.stats = transaction_stats(case.transactions_text)
+                    case.touched_locations = transaction_locations(case.transactions_text)
+            else:
+                case.diagnostics = test_failure_locations(case.message or "", source_index)
+
+        if getattr(args, "junit", None):
+            shutil.copyfile(junit_path, args.junit)
+
+        if args.print_json:
+            print(json.dumps(test_report_json(args, root, command, cases), indent=2, sort_keys=True))
+        else:
+            print_test_report(args, root, command, cases, color, source_index)
+        return 1 if any(case.status != "passed" for case in cases) else 0
+    finally:
+        if getattr(args, "keep_artifacts", False):
+            if not args.print_json:
+                print(f"\nartifacts kept in: {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def resolve_package_root(args: argparse.Namespace) -> Path:
+    candidate = getattr(args, "package_root", None) or "."
+    return Path(candidate).expanduser().resolve()
+
+
+def daml_test_command(
+    args: argparse.Namespace,
+    root: Path,
+    junit_path: Path,
+    txns_dir: Path,
+    table_dir: Path,
+) -> tuple[list[str], dict[str, str]]:
+    executable = str(Path(args.daml or "daml").expanduser())
+    name = Path(executable).name
+    if name == "damlc":
+        command = [executable, "test", "--package-root", str(root)]
+    else:
+        command = [executable, "test"]
+        if name == "daml":
+            command.append("--no-legacy-assistant-warning")
+    command += [
+        "--junit", str(junit_path),
+        "--transactions-output", str(txns_dir),
+        "--table-output", str(table_dir),
+    ]
+    if getattr(args, "test_pattern", None):
+        command += ["--test-pattern", args.test_pattern]
+    files = [f for f in getattr(args, "files", []) or [] if f]
+    if files:
+        command.append("--files")
+        command += files
+    return command, daml_child_env({"DAML_PACKAGE": str(root)})
+
+
+def daml_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for spawning daml/damlc.
+
+    When dpm runs this plugin it exports DPM_RESOLUTION_FILE, a resolution context
+    scoped to the dpm-trace component. A child daml/damlc would wrongly apply it to
+    the package under test ("Failed to find DPM package resolution"), so we drop it
+    and let daml resolve the target package on its own.
+    """
+    env = dict(os.environ)
+    for key in ("DPM_RESOLUTION_FILE",):
+        env.pop(key, None)
+    if extra:
+        env.update(extra)
+    return env
+
+
+def display_command(command: list[str]) -> list[str]:
+    if not command:
+        return command
+    cleaned: list[str] = [Path(command[0]).name]
+    skip_next = False
+    for token in command[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ("--junit", "--transactions-output", "--table-output", "--package-root"):
+            skip_next = True
+            continue
+        if token == "--no-legacy-assistant-warning":
+            continue
+        cleaned.append(token)
+    return cleaned
+
+
+def parse_junit(path: Path) -> list[TestCaseResult]:
+    tree = ET.parse(str(path))
+    results: list[TestCaseResult] = []
+    for suite in tree.getroot().iter("testsuite"):
+        suite_name = suite.get("name") or ""
+        for case in suite.findall("testcase"):
+            failure = case.find("failure")
+            error = case.find("error")
+            if failure is not None:
+                status, node = "failed", failure
+            elif error is not None:
+                status, node = "error", error
+            elif case.find("skipped") is not None:
+                status, node = "skipped", None
+            else:
+                status, node = "passed", None
+            message = None
+            if node is not None:
+                message = (node.get("message") or node.text or "").strip() or None
+            time_attr = case.get("time")
+            results.append(
+                TestCaseResult(
+                    name=case.get("name") or "?",
+                    classname=case.get("classname") or suite_name,
+                    status=status,
+                    message=message,
+                    time=float(time_attr) if time_attr else None,
+                )
+            )
+    return results
+
+
+def transaction_html_to_text(html_text: str) -> str:
+    text = re.sub(r"<style.*?</style>", "", html_text, flags=re.S)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    lines = [line.rstrip() for line in text.splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
+def transaction_stats(text: str) -> dict[str, int]:
+    return {
+        "transactions": len(re.findall(r"(?m)^\s*TX\s+\d+", text)),
+        "creates": len(re.findall(r"\bcreates\b", text)),
+        "exercises": len(re.findall(r"\bexercises\b", text)),
+        "archives": len(re.findall(r"consumed by:", text)),
+        "expectedFailures": len(re.findall(r"\bmustFailAt\b", text)),
+    }
+
+
+def transaction_locations(text: str) -> list[str]:
+    seen: list[str] = []
+    for match in re.finditer(r"\(([A-Za-z0-9_.']+:\d+:\d+)\)", text):
+        loc = match.group(1)
+        if loc not in seen:
+            seen.append(loc)
+    return seen
+
+
+def test_failure_locations(message: str, source_index: SourceIndex) -> list[SourceLocation]:
+    """Resolve a failed test's message to source.
+
+    Daml usually stamps the submit call site as Module:line:col (the "where"); the
+    message body often also carries the assertMsg/abort literal that caused the
+    rejection, which we match back into source (typically the contract — the "why").
+    We surface both, call sites first.
+    """
+    locations: list[SourceLocation] = []
+    seen: set[tuple[str, int, int]] = set()
+
+    def add(loc: SourceLocation) -> None:
+        key = (loc.path, loc.line, loc.column)
+        if key not in seen:
+            seen.add(key)
+            locations.append(loc)
+
+    # Explicit Module:line[:col] coordinates that Daml puts in the message (call sites).
+    for match in re.finditer(r"([A-Za-z0-9_.']+):(\d+)(?::(\d+))?", message or ""):
+        module = match.group(1)
+        files = source_index.module_files.get(module)
+        if not files:
+            continue
+        line = int(match.group(2))
+        column = int(match.group(3) or 1)
+        for path in files:
+            add(SourceLocation(path, line, f"daml test: {module}", column))
+
+    # The rejection text (assertMsg/abort/===) matched back into source (often the contract).
+    for needle in completion_source_needles(strip_canton_error_decoration(message or "")):
+        for loc in source_index.find_failure_text(needle):
+            add(loc)
+            if len(locations) >= 6:
+                return locations[:6]
+    return locations[:6]
+
+
+def strip_canton_error_decoration(message: str) -> str:
+    """Reduce a Daml/Canton failure message to the user-authored text.
+
+    Turns e.g. "... DA.Exception.AssertionFailed:AssertionFailed: Insufficient
+    balance Using Canton Error Category InvalidGivenCurrentSystemStateOther" into
+    "Insufficient balance", so the source search matches the literal in the contract.
+    """
+    text = re.sub(r"\s+Using Canton Error Category.*$", "", message or "").strip()
+    for marker in ("AssertionFailed:", "Aborted:", "Failed with status:"):
+        if marker in text:
+            text = text.split(marker)[-1].strip()
+    return text
+
+
+def test_result_banner(passed: int, failed: int, total: int, color: Color) -> str:
+    if failed:
+        return color.apply(f"{failed} failed, {passed} passed, {total} total", "red", "bold")
+    return color.apply(f"all {passed} passed ({total} total)", "green", "bold")
+
+
+def test_status_icon(status: str, color: Color) -> str:
+    if status == "passed":
+        return color.apply("PASS", "green", "bold")
+    if status == "skipped":
+        return color.apply("SKIP", "gray", "bold")
+    return color.apply("FAIL", "red", "bold")
+
+
+def test_stats_text(stats: dict[str, int], color: Color) -> str:
+    if not stats or not stats.get("transactions"):
+        return color.apply("no transactions", "gray")
+    parts = [f"{stats.get('transactions', 0)} tx"]
+    if stats.get("creates"):
+        parts.append(color.apply(f"+{stats['creates']} create", "green"))
+    if stats.get("exercises"):
+        parts.append(color.apply(f">{stats['exercises']} exercise", "yellow"))
+    if stats.get("archives"):
+        parts.append(color.apply(f"x{stats['archives']} archive", "red"))
+    if stats.get("expectedFailures"):
+        parts.append(color.apply(f"!{stats['expectedFailures']} expected-fail", "blue"))
+    return "  ".join(parts)
+
+
+def print_test_report(
+    args: argparse.Namespace,
+    root: Path,
+    command: list[str],
+    cases: list[TestCaseResult],
+    color: Color,
+    source_index: SourceIndex,
+) -> None:
+    passed = [c for c in cases if c.status == "passed"]
+    failed = [c for c in cases if c.status in ("failed", "error")]
+
+    print(color.apply("DPM trace test", "bold"))
+    print(f"  package:  {root}")
+    print(f"  command:  {' '.join(display_command(command))}")
+    print(f"  result:   {test_result_banner(len(passed), len(failed), len(cases), color)}")
+    print("")
+
+    print(color.apply("Results", "cyan", "bold"))
+    width = max((len(c.name) for c in cases), default=0)
+    for case in cases:
+        icon = test_status_icon(case.status, color)
+        line = f"  {icon}  {case.name:<{width}}"
+        if case.status == "passed":
+            line += "  " + test_stats_text(case.stats, color)
+        print(line)
+        if case.status in ("failed", "error"):
+            print(f"        {color.apply('message:', 'gray')} {case.message or '-'}")
+            for loc in case.diagnostics:
+                snippet = render_source_diagnostic(loc, source_index, color)
+                print(textwrap.indent(snippet, "        "))
+            if not case.diagnostics:
+                print(f"        {color.apply('source:', 'gray')} no matching local source found")
+
+    if not getattr(args, "no_trees", False):
+        trees = [c for c in cases if c.transactions_text]
+        if trees:
+            print("")
+            print(color.apply("Transaction trees", "cyan", "bold"))
+            for case in trees:
+                print("")
+                print("  " + color.apply(f"── {case.name} ──", "magenta", "bold"))
+                print(textwrap.indent(case.transactions_text, "  "))
+
+
+def test_report_json(
+    args: argparse.Namespace,
+    root: Path,
+    command: list[str],
+    cases: list[TestCaseResult],
+) -> dict[str, Any]:
+    passed = sum(1 for c in cases if c.status == "passed")
+    failed = sum(1 for c in cases if c.status == "failed")
+    errored = sum(1 for c in cases if c.status == "error")
+    return {
+        "schema": "dpm-trace/test-report/v0",
+        "package": str(root),
+        "command": command,
+        "summary": {
+            "total": len(cases),
+            "passed": passed,
+            "failed": failed,
+            "errored": errored,
+            "ok": failed == 0 and errored == 0,
+        },
+        "tests": [
+            {
+                "name": case.name,
+                "classname": case.classname,
+                "status": case.status,
+                "time": case.time,
+                "message": case.message,
+                "stats": case.stats,
+                "touchedLocations": case.touched_locations,
+                "diagnostics": [
+                    {"path": loc.path, "line": loc.line, "column": loc.column, "basis": loc.label}
+                    for loc in case.diagnostics
+                ],
+                "transactions": case.transactions_text,
+            }
+            for case in cases
+        ],
+    }
 
 
 def run_trace(args: argparse.Namespace) -> int:
@@ -2292,6 +2704,7 @@ class SourceIndex:
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=30,
+                env=daml_child_env(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return

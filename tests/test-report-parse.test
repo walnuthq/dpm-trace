@@ -1,0 +1,5 @@
+# Daml-independent: exercises the dpm trace test parser and source mapping
+# against committed fixtures, so it runs without a Daml toolchain.
+# RUN: %python %root/tests/check-test-report.py %root | FileCheck %s
+
+# CHECK: dpm trace test parser/mapping checks passed

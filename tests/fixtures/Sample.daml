@@ -1,0 +1,20 @@
+module Sample where
+
+-- Standalone source fixture for dpm trace test source-mapping checks.
+-- It is not compiled by the suite; only its text is matched against a failure
+-- message, so the assertMsg literal below is the anchor the mapper resolves to.
+
+template Vault
+  with
+    owner : Party
+    balance : Int
+  where
+    signatory owner
+
+    choice Withdraw : ()
+      with
+        amount : Int
+      controller owner
+      do
+        assertMsg "sample boundary violated" (amount <= balance)
+        pure ()

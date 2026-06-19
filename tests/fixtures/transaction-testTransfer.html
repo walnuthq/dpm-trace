@@ -1,0 +1,69 @@
+<style>/* Copyright (c) 2025 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.  */
+/* SPDX-License-Identifier: Apache-2.0  */
+
+table, th, td {
+  border: 1px solid;
+  border-collapse: collapse;
+}
+th, td {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+body.hide_archived .archived {
+  display: none;
+}
+body.hide_table .table {
+  display: none;
+}
+body.hide_transaction .transaction {
+  display: none;
+}
+body.hide_note .note {
+  display: none;
+}
+tr.archived td {
+  text-decoration: line-through;
+}
+td.disclosure {
+  max-width: 1em;
+  text-align: center;
+}
+tr.archived td.disclosure {
+  text-decoration: none;
+}
+.hidden_disclosure td.disclosed.disclosure span {
+  display: none;
+}
+.hidden_disclosure td.disclosed.disclosure:after {
+  content: 'X';
+}
+th {
+  vertical-align: bottom;
+}
+div.observer {
+  max-width: 1em;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  white-space: nowrap;
+}
+.tooltip {
+  position: relative;
+  display: inline-block;
+}
+.tooltip .tooltiptext {
+  visibility: hidden;
+  width: 5em;
+  background-color: var(--vscode-editor-foreground);
+  color: var(--vscode-editor-background);
+  text-align: center;
+  border-radius: 4px;
+  padding: 4px 4px;
+  position: absolute;
+  z-index: 1;
+  top: -4px;
+  left: 105%;
+}
+.tooltip:hover .tooltiptext {
+  visibility: visible;
+}
+</style><div class="da-code transaction">Transactions: <br>  <span id="n0"><span class="da-hl-keyword">TX</span></span> <span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n0';">0</span></span> 1970-01-01T00:00:00Z (<a href="command:daml.revealLocation?%5B%22file%3A%2F%2Fdaml%2FTest.daml%22%2C%2038%2C%2039%5D" title="Test:39:10">Test:39:10</a>)<br>  <span id="n#0:0"><span class="da-hl-constructor">#0:0</span></span><br>  │   <span class="da-hl-predicate">consumed by: <span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n#1:0';">#1:0</span></span></span><br>  │   <span class="da-hl-keyword">referenced by</span> <span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n#1:0';">#1:0</span></span><br>  │   <span class="da-hl-keyword">disclosed to (since):</span> &#39;Alice-fa08de96&#39; (<span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n0';">0</span></span>), &#39;Issuer-03d242ca&#39; (<span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n0';">0</span></span>)<br>  └─&gt; &#39;Issuer-03d242ca&#39; <span class="da-hl-keyword">creates</span> <a href="command:daml.revealLocation?%5B%22file%3A%2F%2Fdaml%2FAsset.daml%22%2C%208%2C%2013%5D" title="Asset:Asset">Asset:Asset</a><br>                        <span class="da-hl-keyword">with</span><br>                          issuer = &#39;Issuer-03d242ca&#39;; owner = &#39;Alice-fa08de96&#39;; name = &quot;GOLD&quot;; quantity = 100<br>  <br>  <span id="n1"><span class="da-hl-keyword">TX</span></span> <span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n1';">1</span></span> 1970-01-01T00:00:00Z (<a href="command:daml.revealLocation?%5B%22file%3A%2F%2Fdaml%2FTest.daml%22%2C%2040%2C%2041%5D" title="Test:41:13">Test:41:13</a>)<br>  <span id="n#1:0"><span class="da-hl-constructor">#1:0</span></span><br>  │   <span class="da-hl-keyword">disclosed to (since):</span> &#39;Alice-fa08de96&#39; (<span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n1';">1</span></span>), &#39;Issuer-03d242ca&#39; (<span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n1';">1</span></span>)<br>  └─&gt; &#39;Alice-fa08de96&#39; <span class="da-hl-keyword">exercises</span> Transfer <span class="da-hl-keyword">on</span> <span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n#0:0';">#0:0</span></span> (<a href="command:daml.revealLocation?%5B%22file%3A%2F%2Fdaml%2FAsset.daml%22%2C%208%2C%2013%5D" title="Asset:Asset">Asset:Asset</a>)<br>                       <span class="da-hl-keyword">with</span><br>                         newOwner = &#39;Bob-b030232e&#39;<br>      <span class="da-hl-keyword">children:</span><br>      <span id="n#1:1"><span class="da-hl-constructor">#1:1</span></span><br>      │   <span class="da-hl-keyword">disclosed to (since):</span> &#39;Alice-fa08de96&#39; (<span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n1';">1</span></span>), &#39;Issuer-03d242ca&#39; (<span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n1';">1</span></span>),<br>                                &#39;Bob-b030232e&#39; (<span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n1';">1</span></span>)<br>      └─&gt; &#39;Issuer-03d242ca&#39; <span class="da-hl-keyword">creates</span> <a href="command:daml.revealLocation?%5B%22file%3A%2F%2Fdaml%2FAsset.daml%22%2C%208%2C%2013%5D" title="Asset:Asset">Asset:Asset</a><br>                            <span class="da-hl-keyword">with</span><br>                              issuer = &#39;Issuer-03d242ca&#39;; owner = &#39;Bob-b030232e&#39;; name = &quot;GOLD&quot;; quantity = 100<br><br>Active contracts:  <span class="da-hl-constructor"><span class="da-hl-link" onclick="window.location.hash='n#1:1';">#1:1</span></span><br><br>Return value: {}</div>
