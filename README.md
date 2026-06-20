@@ -256,7 +256,10 @@ integration suite) and a self-contained `unittests/` package:
 dpm trace test . --init
 #   created itests/lit.cfg.py, itests/example.test
 #   created unittests/daml.yaml, unittests/daml/Example.daml
+#   created .github/workflows/dpm-trace.yml   (unit + integration jobs)
 ```
+
+`--no-unittests` / `--no-ci` skip those parts.
 
 Then run the integration suite:
 
