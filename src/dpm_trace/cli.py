@@ -360,6 +360,7 @@ def test_main(argv: list[str]) -> int:
     parser.add_argument("--unittests-dir", default="unittests", help="Unit test package directory to scaffold with --init. Defaults to unittests.")
     parser.add_argument("--no-unittests", action="store_true", help="With --init, do not scaffold the unittests/ package.")
     parser.add_argument("--no-ci", action="store_true", help="With --init, do not scaffold the GitHub Actions workflow.")
+    parser.add_argument("--verbose", action="store_true", help="Verbose integration output: show per-test commands and the Canton log tail on failure.")
     args = parser.parse_args(argv)
     try:
         return run_test(args)
@@ -508,8 +509,12 @@ def run_integration_tests(args: argparse.Namespace) -> int:
             env[f"DPM_TRACE_IT_{name.upper()}"] = pid
 
         print(f"running integration suite: {test_dir}\n")
-        result = subprocess.run([lit, str(test_dir), "-v"], env=env)
-        return result.returncode
+        lit_flags = ["-vv"] if getattr(args, "verbose", False) else ["-v"]
+        result = subprocess.run([lit, str(test_dir)] + lit_flags, env=env)
+        lit_rc = result.returncode
+        if lit_rc != 0 and getattr(args, "verbose", False):
+            sys.stderr.write(f"\n--- Canton log (last 60 lines) ---\n{read_tail(log_path, 60)}\n")
+        return lit_rc
     finally:
         if proc is not None and proc.poll() is None:
             proc.terminate()
