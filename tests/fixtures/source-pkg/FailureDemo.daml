@@ -1,0 +1,22 @@
+module FailureDemo where
+
+import Daml.Script
+
+template GuardedAccount
+  with
+    owner : Party
+    balance : Int
+  where
+    signatory owner
+
+    choice Withdraw : ContractId GuardedAccount
+      with
+        amount : Int
+      controller owner
+      do
+        if amount <= 0 then
+          abort "Withdrawal amount must be positive"
+        else if amount > balance then
+          abort "Insufficient balance"
+        else
+          create this with balance = balance - amount

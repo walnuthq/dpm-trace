@@ -1,4 +1,4 @@
-# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli --completion-file %root/examples/failed-with-source.completion.json --daml-yaml %root/../daml-examples/daml-3x/daml.yaml --color never | FileCheck %s
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli --completion-file %root/examples/failed-with-source.completion.json --daml-yaml %root/tests/fixtures/source-pkg/daml.yaml --color never | FileCheck %s
 
 # CHECK: DPM trace completion
 # CHECK: result:     completion failed

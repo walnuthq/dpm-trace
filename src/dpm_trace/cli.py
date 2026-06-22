@@ -6,10 +6,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -24,6 +26,7 @@ SCAN_UPDATE_PATH = "/v2/updates/{update_id}"
 LEDGER_UPDATE_BY_ID_PATH = "/v2/updates/update-by-id"
 LEDGER_ACTIVE_CONTRACTS_PATH = "/v2/state/active-contracts"
 LEDGER_INTERACTIVE_PREPARE_PATH = "/v2/interactive-submission/prepare"
+LEDGER_SUBMIT_AND_WAIT_PATH = "/v2/commands/submit-and-wait"
 LEDGER_COMPLETIONS_PATH = "/v2/commands/completions"
 TRACE_ARTIFACT_SCHEMA = "dpm-trace/trace-artifact/v0"
 PREPARED_ARTIFACT_SCHEMA = "dpm-trace/prepared-artifact/v0"
@@ -91,12 +94,18 @@ class ExpressionStep:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # The DPM plugin invokes us without the "trace" command name; accept an
+    # explicit leading "trace" too so `dpm_trace.cli trace <id>` works directly.
+    if argv and argv[0] == "trace":
+        argv = argv[1:]
     if argv and argv[0] == "open":
         return open_main(argv[1:])
     if argv and argv[0] == "prepare":
         return prepare_main(argv[1:])
     if argv and argv[0] == "compare":
         return compare_main(argv[1:])
+    if argv and argv[0] == "submit":
+        return submit_main(argv[1:])
     if argv and argv[0] == "test":
         return test_main(argv[1:])
 
@@ -136,6 +145,7 @@ def build_trace_parser() -> argparse.ArgumentParser:
 
 
 def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--wait", type=float, default=0.0, help="Retry the lookup for up to N seconds if the update is not yet visible (e.g. another participant is still catching up).")
     parser.add_argument("--scan-url", help="Scan API base URL, e.g. https://.../api/scan.")
     parser.add_argument("--ledger-url", help="Ledger JSON API base URL, e.g. http://localhost:7575.")
     parser.add_argument("--participant-url", dest="ledger_url", help="Alias for --ledger-url.")
@@ -205,6 +215,75 @@ def prepare_main(argv: list[str]) -> int:
         return 1
 
 
+def submit_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm trace submit",
+        description="Submit a command to a participant (submit-and-wait) and print the resulting update id.",
+        epilog="Intended for integration tests: ID=$(dpm trace submit ... --template '#pkg:Mod:T' --arg owner=$P)",
+    )
+    add_common_connection_args(parser)
+    parser.add_argument("--commands", help="JSON file containing a commands array or an object with a commands field.")
+    parser.add_argument("--command-json", help="Raw JSON command envelope or commands array.")
+    parser.add_argument("--act-as", action="append", default=[], help="Submitting party. Repeatable.")
+    parser.add_argument("--template", help="Template id for an explicit command, e.g. '#pkg:Mod:T'.")
+    parser.add_argument("--choice", help="Choice name for an explicit exercise command.")
+    parser.add_argument("--contract-id", help="Contract id for an explicit exercise command.")
+    parser.add_argument("--args-json", help="JSON object/value to use as create arguments or choice argument.")
+    parser.add_argument("--args-file", help="File containing JSON arguments.")
+    parser.add_argument("--arg", action="append", default=[], help="Set one argument field, e.g. --arg count=1. Repeatable.")
+    parser.add_argument("--command-id", help="Command id. Defaults to dpm-trace-submit-<uuid>.")
+    parser.add_argument("--user-id", help="Ledger API user id for the submission.")
+    parser.add_argument("--allow-fail", action="store_true", help="Do not error on a rejected submission; print the rejection (as JSON) so it can be traced.")
+    parser.add_argument("--print-json", action="store_true", help="Print the full submit-and-wait response.")
+    args = parser.parse_args(argv)
+    try:
+        return run_submit(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def run_submit(args: argparse.Namespace) -> int:
+    apply_config_defaults(args, load_config(args.config))
+    commands = prepare_commands(args)
+    act_as = parse_parties(args.act_as)
+    if not act_as:
+        raise ValueError("--act-as is required")
+    read_as = [party for party in parse_parties(args.read_as + args.party) if party not in act_as]
+    ledger_url = participant_ledger_url(args)
+    token = args.token or read_token_file(args.token_file)
+    request: dict[str, Any] = {
+        "commandId": args.command_id or f"dpm-trace-submit-{uuid4().hex[:12]}",
+        "commands": commands,
+        "actAs": act_as,
+        "readAs": read_as,
+    }
+    user_id = prepare_user_id(args) if not args.user_id else args.user_id
+    if user_id:
+        request["userId"] = user_id
+
+    url = join_url(ledger_url, LEDGER_SUBMIT_AND_WAIT_PATH)
+    if getattr(args, "allow_fail", False):
+        ok, response = http_post_allow_error(url, request, token)
+        if args.print_json or not ok:
+            # On rejection the body is what callers trace with --completion-file.
+            print(json.dumps(response, indent=2, sort_keys=True))
+            return 0
+        update_id = response.get("updateId") if isinstance(response, dict) else None
+        print(update_id or json.dumps(response))
+        return 0
+
+    response = http_json("POST", url, body=request, token=token)
+    if args.print_json:
+        print(json.dumps(response, indent=2, sort_keys=True))
+        return 0
+    update_id = response.get("updateId") if isinstance(response, dict) else None
+    if not update_id:
+        raise ValueError(f"submit-and-wait returned no updateId: {response}")
+    print(update_id)
+    return 0
+
+
 def compare_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="dpm trace compare",
@@ -270,6 +349,18 @@ def test_main(argv: list[str]) -> int:
     parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--config", help="Trace config JSON. Defaults to .dpm-trace.json found in the current directory or a parent.")
     parser.add_argument("--color", choices=["auto", "always", "never"], default="auto")
+    # Integration mode: run an lit suite against a managed local Canton node.
+    parser.add_argument("--integration", metavar="DIR", help="Run an lit integration suite against a managed local Canton node instead of unit tests.")
+    parser.add_argument("--canton-jar", help="Canton jar for --integration. Defaults to $DPM_TRACE_CANTON_JAR.")
+    parser.add_argument("--lit", help="lit executable for --integration. Defaults to lit.")
+    parser.add_argument("--parties", help="Comma-separated parties to allocate for --integration. Defaults to Alice,Bob.")
+    parser.add_argument("--canton-timeout", type=int, default=180, help="Seconds to wait for Canton readiness. Defaults to 180.")
+    parser.add_argument("--init", dest="init", action="store_true", help="Scaffold the test directories (itests/ + unittests/) in the package and exit.")
+    parser.add_argument("--itests-dir", default="itests", help="Integration test directory to scaffold with --init. Defaults to itests.")
+    parser.add_argument("--unittests-dir", default="unittests", help="Unit test package directory to scaffold with --init. Defaults to unittests.")
+    parser.add_argument("--no-unittests", action="store_true", help="With --init, do not scaffold the unittests/ package.")
+    parser.add_argument("--no-ci", action="store_true", help="With --init, do not scaffold the GitHub Actions workflow.")
+    parser.add_argument("--verbose", action="store_true", help="Verbose integration output: show per-test commands and the Canton log tail on failure.")
     args = parser.parse_args(argv)
     try:
         return run_test(args)
@@ -280,6 +371,10 @@ def test_main(argv: list[str]) -> int:
 
 def run_test(args: argparse.Namespace) -> int:
     apply_config_defaults(args, load_config(getattr(args, "config", None)))
+    if getattr(args, "init", False):
+        return run_init(args)
+    if getattr(args, "integration", None):
+        return run_integration_tests(args)
     color = Color.from_mode(args.color)
     root = resolve_package_root(args)
     daml_yaml = root / "daml.yaml"
@@ -354,6 +449,464 @@ def run_test(args: argparse.Namespace) -> int:
                 print(f"\nartifacts kept in: {work}")
         else:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def run_integration_tests(args: argparse.Namespace) -> int:
+    test_dir = Path(args.integration).expanduser().resolve()
+    if not test_dir.exists():
+        print(f"error: integration test dir not found: {test_dir}", file=sys.stderr)
+        return 2
+    root = resolve_package_root(args)
+    daml = args.daml or "daml"
+    canton_jar = args.canton_jar or os.environ.get("DPM_TRACE_CANTON_JAR")
+    if not canton_jar or not Path(canton_jar).expanduser().exists():
+        print("error: --canton-jar (or DPM_TRACE_CANTON_JAR) must point at a Canton jar", file=sys.stderr)
+        return 2
+    lit = args.lit or "lit"
+    placements = parse_party_placements(args.parties or "Alice,Bob")
+    num_participants = max((index for _, index in placements), default=1)
+
+    dar = args.dar[0] if getattr(args, "dar", None) else None
+    if not dar:
+        print("building DAR ...")
+        dar = build_dar(root, daml)
+    dar = str(Path(dar).expanduser().resolve())
+
+    work = Path(tempfile.mkdtemp(prefix="dpm-trace-itest-"))
+    log_path = work / "canton.log"
+    proc = None
+    try:
+        ports = find_free_ports(3 + 3 * num_participants)
+        seq_pub, seq_admin, med_admin = ports[:3]
+        participant_ports = [tuple(ports[3 + 3 * i: 6 + 3 * i]) for i in range(num_participants)]
+        participant_urls = [f"http://127.0.0.1:{trio[2]}" for trio in participant_ports]
+        (work / "canton.conf").write_text(canton_config_text(seq_pub, seq_admin, med_admin, participant_ports))
+        (work / "bootstrap.canton").write_text(canton_bootstrap_text(dar, placements, num_participants))
+
+        endpoints = ", ".join(f"participant{i + 1} :{participant_ports[i][2]}" for i in range(num_participants))
+        print(f"booting local Canton ({endpoints}); deploying {Path(dar).name} ...")
+        with open(log_path, "wb") as log_fh:
+            proc = subprocess.Popen(
+                ["java", "-jar", str(Path(canton_jar).expanduser()), "daemon",
+                 "-c", str(work / "canton.conf"), "--bootstrap", str(work / "bootstrap.canton"), "--no-tty"],
+                stdout=log_fh, stderr=subprocess.STDOUT, cwd=str(work), env=daml_child_env(),
+            )
+        placements_with_urls = [(name, participant_urls[index - 1]) for name, index in placements]
+        party_ids = wait_for_parties(placements_with_urls, proc, log_path, args.canton_timeout)
+        print("Canton ready: " + ", ".join(f"{name}={short_party(pid)}" for name, pid in party_ids.items()))
+
+        env = daml_child_env({
+            "DPM_TRACE_IT_LEDGER": participant_urls[0],
+            "DPM_TRACE_IT_DAR": dar,
+            "DPM_TRACE_IT_DAML": str(Path(daml).expanduser()),
+            "DPM_TRACE_IT_DAML_YAML": str(root / "daml.yaml"),
+            "DPM_TRACE_IT_SRC": str(Path(__file__).resolve().parents[1]),
+            "DPM_TRACE_IT_PYTHON": sys.executable,
+        })
+        for index in range(2, num_participants + 1):
+            env[f"DPM_TRACE_IT_LEDGER{index}"] = participant_urls[index - 1]
+        for name, pid in party_ids.items():
+            env[f"DPM_TRACE_IT_{name.upper()}"] = pid
+
+        print(f"running integration suite: {test_dir}\n")
+        lit_flags = ["-vv"] if getattr(args, "verbose", False) else ["-v"]
+        result = subprocess.run([lit, str(test_dir)] + lit_flags, env=env)
+        lit_rc = result.returncode
+        if lit_rc != 0 and getattr(args, "verbose", False):
+            sys.stderr.write(f"\n--- Canton log (last 60 lines) ---\n{read_tail(log_path, 60)}\n")
+        return lit_rc
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if getattr(args, "keep_artifacts", False):
+            print(f"\nkept Canton log + config: {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def find_free_ports(count: int) -> list[int]:
+    socks: list[socket.socket] = []
+    try:
+        ports: list[int] = []
+        for _ in range(count):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            ports.append(sock.getsockname()[1])
+            socks.append(sock)
+        return ports
+    finally:
+        for sock in socks:
+            sock.close()
+
+
+def parse_party_placements(parties_arg: str) -> list[tuple[str, int]]:
+    """Parse `Alice,Bob@2` into [("Alice", 1), ("Bob", 2)] -- party -> participant index."""
+    placements: list[tuple[str, int]] = []
+    for token in parties_arg.split(","):
+        name, _, index_text = token.strip().partition("@")
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            index = int(index_text) if index_text else 1
+        except ValueError:
+            index = 1
+        placements.append((name, max(index, 1)))
+    return placements
+
+
+def canton_config_text(
+    seq_pub: int,
+    seq_admin: int,
+    med_admin: int,
+    participant_ports: list[tuple[int, int, int]],
+) -> str:
+    blocks = []
+    for index, (p_admin, p_ledger, p_http) in enumerate(participant_ports, start=1):
+        blocks.append(
+            f"    participant{index} {{\n"
+            f"      storage.type = memory\n"
+            f"      admin-api.port = {p_admin}\n"
+            f"      ledger-api.port = {p_ledger}\n"
+            f"      http-ledger-api.port = {p_http}\n"
+            f"    }}"
+        )
+    participants = "\n".join(blocks)
+    return f"""canton {{
+  sequencers {{
+    sequencer1 {{
+      storage.type = memory
+      public-api.port = {seq_pub}
+      admin-api.port = {seq_admin}
+      sequencer.type = BFT
+    }}
+  }}
+  mediators {{
+    mediator1 {{
+      storage.type = memory
+      admin-api.port = {med_admin}
+    }}
+  }}
+  participants {{
+{participants}
+  }}
+}}
+"""
+
+
+def canton_bootstrap_text(dar: str, placements: list[tuple[str, int]], num_participants: int) -> str:
+    lines = ["nodes.local.start()", "bootstrap.synchronizer_local()"]
+    for index in range(1, num_participants + 1):
+        lines.append(f'participant{index}.synchronizers.connect_local(sequencer1, alias = "da")')
+    active = " && ".join(f'participant{index}.synchronizers.active("da")' for index in range(1, num_participants + 1))
+    lines.append("utils.retry_until_true { " + active + " }")
+    lines.append(f'participants.all.dars.upload("{dar}")')
+    for name, index in placements:
+        lines.append(f'participant{index}.parties.enable("{name}")')
+    lines.append('println("=== dpm-trace integration ready ===")')
+    return "\n".join(lines) + "\n"
+
+
+def wait_for_parties(
+    placements: list[tuple[str, str]],
+    proc: "subprocess.Popen[bytes]",
+    log_path: Path,
+    timeout: int,
+) -> dict[str, str]:
+    """placements: [(party-name, that participant's ledger url)]."""
+    deadline = time.monotonic() + max(timeout, 1)
+    last_error: str | None = None
+    found: dict[str, str] = {}
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"Canton exited during startup (code {proc.returncode}):\n{read_tail(log_path, 40)}"
+            )
+        try:
+            for name, ledger_url in placements:
+                if name in found:
+                    continue
+                data = http_json("GET", join_url(ledger_url, "/v2/parties"))
+                details = data.get("partyDetails") if isinstance(data, dict) else None
+                if isinstance(details, list):
+                    for detail in details:
+                        party = str(detail.get("party", ""))
+                        if party.startswith(name + "::"):
+                            found[name] = party
+                            break
+            if len(found) == len(placements):
+                # Parties exist on the Ledger API, but their topology can take a
+                # moment to become effective on the synchronizer (otherwise a
+                # submission naming a fresh informee fails with UNKNOWN_INFORMEES).
+                time.sleep(3.0)
+                return found
+        except Exception as exc:  # noqa: BLE001 - readiness polling tolerates any error
+            last_error = str(exc)
+        time.sleep(1.0)
+    raise RuntimeError(f"Canton did not become ready within {timeout}s (last error: {last_error})")
+
+
+def read_tail(path: Path, lines: int) -> str:
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(content[-lines:])
+
+
+def build_dar(root: Path, daml: str) -> str:
+    executable = str(Path(daml).expanduser())
+    name = Path(executable).name
+    command = [executable, "build"]
+    if name == "damlc":
+        command = [executable, "build", "--package-root", str(root)]
+    elif name == "daml":
+        command.append("--no-legacy-assistant-warning")
+    completed = subprocess.run(
+        command, cwd=str(root), env=daml_child_env({"DAML_PACKAGE": str(root)}),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"daml build failed:\n{completed.stdout}")
+    dist = root / ".daml" / "dist"
+    dars = sorted(dist.glob("*.dar")) if dist.exists() else []
+    if not dars:
+        raise RuntimeError(f"daml build produced no DAR in {dist}")
+    return str(max(dars, key=lambda path: path.stat().st_mtime))
+
+
+def run_init(args: argparse.Namespace) -> int:
+    root = resolve_package_root(args)
+    daml_yaml = root / "daml.yaml"
+    if not daml_yaml.exists():
+        print(f"error: {root} is not a Daml package (no daml.yaml found)", file=sys.stderr)
+        return 2
+    sdk_version = read_daml_yaml_field(daml_yaml, "sdk-version") or "3.4.11"
+    package_name = read_daml_yaml_field(daml_yaml, "name") or "app"
+    color = Color.from_mode(getattr(args, "color", "auto"))
+    created: list[Path] = []
+    skipped: list[Path] = []
+
+    def scaffold(path: Path, text: str) -> None:
+        if path.exists():
+            skipped.append(path)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        created.append(path)
+
+    itests = root / (getattr(args, "itests_dir", None) or "itests")
+    scaffold(itests / "lit.cfg.py", integration_lit_cfg_text())
+    scaffold(itests / "example.test", integration_example_test_text())
+
+    unittests_name = getattr(args, "unittests_dir", None) or "unittests"
+    if not getattr(args, "no_unittests", False):
+        unit = root / unittests_name
+        scaffold(unit / "daml.yaml", unit_test_daml_yaml_text(package_name, sdk_version))
+        scaffold(unit / "daml" / "Example.daml", unit_test_example_text())
+
+    if not getattr(args, "no_ci", False):
+        scaffold(root / ".github" / "workflows" / "dpm-trace.yml",
+                 ci_workflow_text(sdk_version, itests.name, unittests_name, not getattr(args, "no_unittests", False)))
+
+    print(color.apply("dpm trace test --init", "bold"))
+    print(f"  package: {root}")
+    for path in created:
+        print("  " + color.apply("created", "green") + f"  {path.relative_to(root)}")
+    for path in skipped:
+        print("  " + color.apply("kept", "gray") + f"     {path.relative_to(root)} (already exists)")
+    print("")
+    print("Next steps:")
+    print(f"  unit tests:        " + color.apply(f"dpm trace test {unittests_name}", "cyan")
+          + " (self-contained package; or `dpm trace test .` for this package's scripts)")
+    print(f"  integration tests: " + color.apply(f"dpm trace test . --integration {itests.name} --canton-jar <canton.jar>", "cyan"))
+    return 0
+
+
+def read_daml_yaml_field(path: Path, field: str) -> str | None:
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        match = re.match(rf"\s*{re.escape(field)}\s*:\s*(.+?)\s*$", line)
+        if match:
+            return strip_yaml_scalar(match.group(1))
+    return None
+
+
+def unit_test_daml_yaml_text(package_name: str, sdk_version: str) -> str:
+    return f"""sdk-version: {sdk_version}
+name: {package_name}-unittests
+source: daml
+version: 1.0.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+# To test the package under test, build it and add its DAR here:
+# data-dependencies:
+#   - ../.daml/dist/{package_name}-1.0.0.dar
+"""
+
+
+def unit_test_example_text() -> str:
+    return '''-- Unit test package scaffolded by `dpm trace test --init`.
+-- Run with:  dpm trace test unittests
+--
+-- This is self-contained. To test your own templates, add the package under
+-- test as a data-dependency in daml.yaml and import its modules here.
+module Example where
+
+import Daml.Script
+import DA.Assert ((===))
+
+template Box
+  with
+    owner : Party
+    value : Int
+  where
+    signatory owner
+    ensure value >= 0
+
+testBoxHoldsValue : Script ()
+testBoxHoldsValue = do
+  alice <- allocateParty "Alice"
+  cid <- submit alice do createCmd Box with owner = alice; value = 5
+  Some box <- queryContractId alice cid
+  box.value === 5
+
+testBoxRejectsNegative : Script ()
+testBoxRejectsNegative = do
+  alice <- allocateParty "Alice"
+  submitMustFail alice do createCmd Box with owner = alice; value = -1
+'''
+
+
+def ci_workflow_text(sdk_version: str, itests_dir: str, unittests_dir: str, with_unittests: bool) -> str:
+    unit_target = unittests_dir if with_unittests else "."
+    return f"""name: dpm-trace
+
+# Generated by `dpm trace test --init`. The unit job gates every push/PR; the
+# integration job boots a real local Canton. dpm-trace is fetched from GitHub.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out dpm-trace
+        uses: actions/checkout@v4
+        with:
+          repository: walnuthq/dpm-trace
+          path: dpm-trace
+      - name: Install Daml SDK
+        run: |
+          curl -sSL https://get.daml.com/ | sh -s {sdk_version}
+          echo "$HOME/.daml/bin" >> "$GITHUB_PATH"
+      - name: Unit tests (dpm trace test)
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/dpm-trace/src" python3 -m dpm_trace.cli test {unit_target} \\
+            --daml daml --no-trees --junit unit-results.xml
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out dpm-trace
+        uses: actions/checkout@v4
+        with:
+          repository: walnuthq/dpm-trace
+          path: dpm-trace
+      - name: Install Daml SDK
+        run: |
+          curl -sSL https://get.daml.com/ | sh -s {sdk_version}
+          echo "$HOME/.daml/bin" >> "$GITHUB_PATH"
+      - name: Install lit + FileCheck
+        run: |
+          python3 -m pip install --user lit
+          sudo apt-get update && sudo apt-get install -y llvm
+          command -v FileCheck || sudo ln -sf "$(ls /usr/lib/llvm-*/bin/FileCheck | head -1)" /usr/local/bin/FileCheck
+      - name: Integration tests (managed Canton)
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/dpm-trace/src" python3 -m dpm_trace.cli test . \\
+            --integration {itests_dir} \\
+            --canton-jar "$HOME/.daml/sdk/{sdk_version}/canton/canton.jar" \\
+            --daml daml
+"""
+
+
+def integration_lit_cfg_text() -> str:
+    return '''import os
+import sys
+
+import lit.formats
+
+# Generated by `dpm trace test --init`. Integration tests run against the live
+# Canton node that `dpm trace test --integration` boots; connection details
+# arrive via DPM_TRACE_IT_* environment variables.
+config.name = "dpm-trace-integration"
+config.test_format = lit.formats.ShTest(execute_external=True)  # real /bin/sh: $(...) etc.
+config.suffixes = [".test"]
+config.test_source_root = os.path.dirname(__file__)
+config.test_exec_root = os.path.join(config.test_source_root, ".lit")
+
+# The runner exports DPM_TRACE_IT_* before invoking lit. If they are missing the
+# suite was started without a live Canton (e.g. plain `lit`); fail loudly rather
+# than skip, so a mis-wired runner can never go green with zero tests run.
+ledger = os.environ.get("DPM_TRACE_IT_LEDGER")
+if not ledger:
+    lit_config.fatal(
+        "integration tests need a live Canton; run them with "
+        "`dpm trace test --integration <dir>` (DPM_TRACE_IT_LEDGER is not set)."
+    )
+
+python = os.environ.get("DPM_TRACE_IT_PYTHON", sys.executable)
+config.environment["PYTHONPATH"] = os.environ.get("DPM_TRACE_IT_SRC", "")
+
+config.substitutions.append(("%daml-yaml", os.environ.get("DPM_TRACE_IT_DAML_YAML", "")))
+config.substitutions.append(("%damlc", os.environ.get("DPM_TRACE_IT_DAML", "daml")))
+# %ledger2 must precede %ledger -- otherwise "%ledger" matches inside "%ledger2".
+config.substitutions.append(("%ledger2", os.environ.get("DPM_TRACE_IT_LEDGER2", "")))
+config.substitutions.append(("%ledger", ledger))
+config.substitutions.append(("%alice", os.environ.get("DPM_TRACE_IT_ALICE", "")))
+config.substitutions.append(("%bob", os.environ.get("DPM_TRACE_IT_BOB", "")))
+config.substitutions.append(("%dar", os.environ.get("DPM_TRACE_IT_DAR", "")))
+config.substitutions.append(("%python", python))
+config.substitutions.append(("%dpm", python + " -m dpm_trace.cli"))
+'''
+
+
+def integration_example_test_text() -> str:
+    return '''# Example integration test scaffolded by `dpm trace test --init`.
+#
+# Replace the smoke check below with a real submission against your templates.
+# Available substitutions: %dpm, %ledger, %alice, %bob, %dar, %daml-yaml, %damlc, %python.
+#
+# Create-and-trace pattern:
+#   # RUN: ID=$(%dpm submit --submitter %ledger --act-as %alice \\
+#   # RUN:        --template '#<package-name>:<Module>:<Template>' --arg field=value) \\
+#   # RUN:   && %dpm trace "$ID" --submitter %ledger --read-as %alice --color never | FileCheck %s
+#   # CHECK: CREATE <Module>:<Template>
+#
+# Smoke check (passes out of the box; proves %dpm and the harness are wired):
+# RUN: %dpm --explain-apis | FileCheck %s
+# CHECK: Ledger JSON API
+'''
 
 
 def resolve_package_root(args: argparse.Namespace) -> Path:
@@ -718,7 +1271,7 @@ def run_trace(args: argparse.Namespace) -> int:
     try:
         update_id = extract_update_id(args.target)
         parties = parse_parties(args.read_as + args.party)
-        raw, source, source_url = load_update(args, update_id, parties)
+        raw, source, source_url = load_update_with_wait(args, update_id, parties)
         trace = normalize_trace(raw, source=source, source_url=source_url, parties=parties)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1961,6 +2514,26 @@ def config_values(value: Any) -> list[str]:
     return [str(value)]
 
 
+def load_update_with_wait(
+    args: argparse.Namespace,
+    update_id: str | None,
+    parties: list[str],
+) -> tuple[dict[str, Any], str, str | None]:
+    wait = float(getattr(args, "wait", 0.0) or 0.0)
+    if wait <= 0:
+        return load_update(args, update_id, parties)
+    # Retry while the update is not yet visible (e.g. a second participant is
+    # still ingesting the committed transaction from the synchronizer).
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            return load_update(args, update_id, parties)
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+
+
 def load_update(
     args: argparse.Namespace,
     update_id: str | None,
@@ -2038,6 +2611,28 @@ def http_json(method: str, url: str, body: dict[str, Any] | None = None, token: 
         raise RuntimeError(f"{method} {url} failed with HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"{method} {url} failed: {exc.reason}") from exc
+
+
+def http_post_allow_error(url: str, body: dict[str, Any], token: str | None = None) -> tuple[bool, Any]:
+    """POST returning (ok, parsed_body). On an HTTP error the rejection body is
+    parsed and returned (ok=False) instead of raising, so callers can inspect a
+    failed submission."""
+    data = json.dumps(body).encode("utf-8")
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token.strip()}"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return True, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            return False, json.loads(raw)
+        except json.JSONDecodeError:
+            return False, {"status": exc.code, "error": raw}
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"POST {url} failed: {exc.reason}") from exc
 
 
 def ledger_update_by_id_body(update_id: str, parties: list[str]) -> dict[str, Any]:

@@ -29,6 +29,8 @@ def candidate_files(root: Path) -> list[Path]:
     result = subprocess.run(
         [
             "git",
+            "-c",
+            "safe.directory=*",
             "-C",
             str(root),
             "ls-files",
