@@ -3,9 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DPM_BIN="${DPM_BIN:-$HOME/.dpm/bin/dpm}"
-SDK_VERSION="${SDK_VERSION:-3.4.11}"
+SDK_VERSION="${SDK_VERSION:-$("$DPM_BIN" version 2>/dev/null | awk '/\*/{print $2}')}"
 COMPONENT_VERSION="${COMPONENT_VERSION:-0.1.0}"
-DPM_HOME="${DPM_HOME:-$ROOT/.dpm-home}"
+DPM_HOME="${DPM_HOME:-$HOME/.dpm}"
 
 if [[ ! -x "$DPM_BIN" ]]; then
   echo "error: DPM not found at $DPM_BIN" >&2
@@ -21,10 +21,12 @@ fi
 
 mkdir -p "$DPM_HOME/cache/components" "$DPM_HOME/cache/sdk/open-source"
 
-for component in "$HOME/.dpm/cache/components/"*; do
-  [[ -e "$component" ]] || continue
-  ln -sfn "$component" "$DPM_HOME/cache/components/$(basename "$component")"
-done
+if [[ "$DPM_HOME" != "$HOME/.dpm" ]]; then
+  for component in "$HOME/.dpm/cache/components/"*; do
+    [[ -e "$component" ]] || continue
+    ln -sfn "$component" "$DPM_HOME/cache/components/$(basename "$component")"
+  done
+fi
 
 COMPONENT_DIR="$DPM_HOME/cache/components/dpm-trace/$COMPONENT_VERSION"
 mkdir -p "$COMPONENT_DIR/bin"
@@ -33,8 +35,9 @@ ln -sfn "$ROOT/bin/dpm-trace" "$COMPONENT_DIR/bin/dpm-trace"
 
 LOCAL_MANIFEST="$DPM_HOME/cache/sdk/open-source/$SDK_VERSION.yaml"
 if grep -q '^    dpm-trace:' "$GLOBAL_MANIFEST"; then
-  cp "$GLOBAL_MANIFEST" "$LOCAL_MANIFEST"
+  [[ "$LOCAL_MANIFEST" != "$GLOBAL_MANIFEST" ]] && cp "$GLOBAL_MANIFEST" "$LOCAL_MANIFEST"
 else
+  TMP="$(mktemp)"
   awk -v version="$COMPONENT_VERSION" '
     /^  assistant:/ && !added {
       print "    dpm-trace:"
@@ -42,10 +45,15 @@ else
       added = 1
     }
     { print }
-  ' "$GLOBAL_MANIFEST" > "$LOCAL_MANIFEST"
+  ' "$GLOBAL_MANIFEST" > "$TMP"
+  mv "$TMP" "$LOCAL_MANIFEST"
 fi
 
-echo "Installed local DPM trace component."
+echo "Installed dpm-trace component (SDK $SDK_VERSION)."
 echo
 echo "Run with:"
-echo "  DPM_HOME=$DPM_HOME $DPM_BIN trace --help"
+if [[ "$DPM_HOME" != "$HOME/.dpm" ]]; then
+  echo "  DPM_HOME=$DPM_HOME $DPM_BIN trace --help"
+else
+  echo "  $DPM_BIN trace --help"
+fi
