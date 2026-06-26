@@ -14,8 +14,23 @@ It demonstrates the proposal surface:
 
 ## Setup
 
+Install from GitHub (Python 3.10+, no dependencies) and register it as a DPM
+plugin so it runs as `dpm trace`:
+
 ```bash
-.venv/bin/python -m pip install -e .
+pip install git+https://github.com/walnuthq/dpm-trace.git
+dpm-trace install-plugin     # registers the `dpm trace` plugin (one-time)
+dpm trace --help
+```
+
+`dpm-trace install-plugin` writes the component into your DPM home (`$DPM_HOME`
+or `~/.dpm`) and adds it to the active SDK manifest. Without it, the standalone
+CLI is still available as `dpm-trace` (e.g. `dpm-trace test .`).
+
+From a clone, the equivalent of the two steps above is:
+
+```bash
+pip install -e .
 ./scripts/install-local-dpm-trace.sh
 ```
 
