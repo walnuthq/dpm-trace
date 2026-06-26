@@ -18,6 +18,7 @@ Command surface:
 - `dpm trace compare`: compare prepared transactions, successful transactions, or completion data.
 - `dpm trace test`: run Daml Script unit tests (unit mode) or an lit suite against a managed local Canton (`--integration`).
 - `dpm trace ... --visualize`: open the interactive CLI visualizer.
+- `dpm-trace install-plugin`: register the pip-installed CLI as a DPM plugin (so `dpm trace` works without a repo clone); mirrors `scripts/install-local-dpm-trace.sh`.
 
 `main()` strips a leading `trace` arg, so `dpm_trace.cli trace <id>` behaves like
 the plugin's `dpm trace <id>`.

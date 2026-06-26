@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         return submit_main(argv[1:])
     if argv and argv[0] == "test":
         return test_main(argv[1:])
+    if argv and argv[0] == "install-plugin":
+        return install_plugin_main(argv[1:])
 
     parser = build_trace_parser()
     args = parser.parse_args(argv)
@@ -282,6 +284,133 @@ def run_submit(args: argparse.Namespace) -> int:
         raise ValueError(f"submit-and-wait returned no updateId: {response}")
     print(update_id)
     return 0
+
+
+def install_plugin_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm-trace install-plugin",
+        description="Register dpm-trace as a DPM plugin so it can be run as `dpm trace`.",
+        epilog="After `pip install`, run this once, then use `dpm trace ...`.",
+    )
+    parser.add_argument("--dpm-home", help="DPM home to register into. Defaults to $DPM_HOME or ~/.dpm.")
+    parser.add_argument("--sdk-version", help="SDK manifest version to register into. Defaults to the active/installed SDK.")
+    parser.add_argument("--component-version", help="Component version. Defaults to the installed dpm-trace version.")
+    args = parser.parse_args(argv)
+    try:
+        return run_install_plugin(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def run_install_plugin(args: argparse.Namespace) -> int:
+    dpm_home = Path(args.dpm_home or os.environ.get("DPM_HOME") or (Path.home() / ".dpm")).expanduser()
+    component_version = args.component_version or package_version()
+    sdk_version = args.sdk_version or detect_sdk_version(dpm_home)
+    if not sdk_version:
+        print(
+            "error: could not find an installed SDK manifest under "
+            f"{dpm_home / 'cache' / 'sdk' / 'open-source'}; pass --sdk-version (e.g. 3.4.11)",
+            file=sys.stderr,
+        )
+        return 2
+    manifest = dpm_home / "cache" / "sdk" / "open-source" / f"{sdk_version}.yaml"
+    if not manifest.exists():
+        print(
+            f"error: SDK manifest not found: {manifest}\n"
+            f"Install the SDK first (e.g. `dpm install {sdk_version}`).",
+            file=sys.stderr,
+        )
+        return 2
+
+    component_dir = dpm_home / "cache" / "components" / "dpm-trace" / component_version
+    (component_dir / "bin").mkdir(parents=True, exist_ok=True)
+    (component_dir / "component.yaml").write_text(component_yaml_text(), encoding="utf-8")
+    wrapper = component_dir / "bin" / "dpm-trace"
+    # The plugin command runs this wrapper, which re-enters the installed package
+    # with the same Python interpreter that ran `install-plugin`.
+    wrapper.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" -m dpm_trace.cli "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    register_component_in_manifest(manifest, "dpm-trace", component_version)
+
+    print(f"Registered dpm-trace {component_version} as a DPM plugin (SDK {sdk_version}) in {dpm_home}.")
+    print("Run with:  dpm trace --help")
+    return 0
+
+
+def component_yaml_text() -> str:
+    return (
+        "apiVersion: digitalasset.com/v1\n"
+        "kind: Component\n"
+        "spec:\n"
+        "  commands:\n"
+        "    - name: trace\n"
+        "      path: bin/dpm-trace\n"
+        "      desc: Visualize and compare Canton transactions\n"
+    )
+
+
+def register_component_in_manifest(manifest: Path, name: str, version: str) -> None:
+    lines = manifest.read_text(encoding="utf-8").splitlines()
+    if any(re.match(rf"^    {re.escape(name)}:", line) for line in lines):
+        return  # already registered
+    # Components live under `spec.components:`; the `assistant:` key (dpm's own
+    # version) follows it. Insert as the last component, i.e. just before
+    # `  assistant:`, matching how the install script's awk does it.
+    out: list[str] = []
+    added = False
+    for line in lines:
+        if not added and re.match(r"^  assistant:\s*$", line):
+            out.append(f"    {name}:")
+            out.append(f"      version: {version}")
+            added = True
+        out.append(line)
+    if not added:
+        for index, line in enumerate(lines):
+            if re.match(r"^  components:\s*$", line):
+                out = lines[: index + 1] + [f"    {name}:", f"      version: {version}"] + lines[index + 1 :]
+                added = True
+                break
+    if not added:
+        out = lines + [f"    {name}:", f"      version: {version}"]
+    manifest.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def detect_sdk_version(dpm_home: Path) -> str | None:
+    sdk_dir = dpm_home / "cache" / "sdk" / "open-source"
+    versions = sorted(path.stem for path in sdk_dir.glob("*.yaml")) if sdk_dir.exists() else []
+    if not versions:
+        return None
+    active = active_dpm_version(dpm_home)
+    if active and active in versions:
+        return active
+    return versions[-1]
+
+
+def active_dpm_version(dpm_home: Path) -> str | None:
+    dpm_bin = dpm_home / "bin" / "dpm"
+    if not dpm_bin.exists():
+        return None
+    try:
+        completed = subprocess.run([str(dpm_bin), "version"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in completed.stdout.splitlines():
+        if "*" in line:
+            tokens = line.replace("*", " ").split()
+            if tokens:
+                return tokens[0]
+    return None
+
+
+def package_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("dpm-trace")
+    except Exception:  # noqa: BLE001 - any failure falls back to a sane default
+        return "0.1.0"
 
 
 def compare_main(argv: list[str]) -> int:

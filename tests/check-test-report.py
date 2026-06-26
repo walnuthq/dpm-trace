@@ -21,6 +21,7 @@ def main() -> int:
     from dpm_trace.cli import (  # noqa: E402
         SourceIndex,
         parse_junit,
+        register_component_in_manifest,
         strip_canton_error_decoration,
         test_failure_locations,
         transaction_html_to_text,
@@ -91,6 +92,24 @@ def main() -> int:
     )
     check(explicit, f"explicit Sample:9 location not resolved: {[(Path(m.path).name, m.line) for m in mapped]}")
     check(literal, f"assertMsg literal not mapped into source: {[(Path(m.path).name, m.line) for m in mapped]}")
+
+    # 5. install-plugin: the component registers under `components:` (before `assistant:`).
+    manifest = Path(tempfile.mkstemp(suffix=".yaml")[1])
+    try:
+        manifest.write_text(
+            "apiVersion: x\nspec:\n  components:\n    damlc:\n      version: 3.4.11\n"
+            "  assistant:\n    version: 1.0.10\n",
+            encoding="utf-8",
+        )
+        register_component_in_manifest(manifest, "dpm-trace", "0.1.0")
+        text = manifest.read_text(encoding="utf-8")
+    finally:
+        manifest.unlink(missing_ok=True)
+    check("    dpm-trace:" in text, "install-plugin did not register dpm-trace in the manifest")
+    check(
+        "dpm-trace:" in text and text.index("dpm-trace:") < text.index("  assistant:"),
+        "install-plugin placed dpm-trace under assistant: instead of components:",
+    )
 
     if errors:
         print("dpm trace test parser/mapping checks FAILED:")
