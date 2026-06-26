@@ -1,0 +1,5 @@
+# Daml-independent: exercises the compare_* family and --print-json renderers
+# against committed fixtures, so it runs without a Canton node or Daml toolchain.
+# RUN: %python %root/tests/check-compare.py %root | FileCheck %s
+
+# CHECK: dpm trace compare checks passed

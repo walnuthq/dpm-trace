@@ -1,0 +1,74 @@
+{
+  "schema": "dpm-trace/trace-artifact/v0",
+  "createdAt": "2024-01-15T10:02:00Z",
+  "kind": "committed-update",
+  "trace": {
+    "updateId": "update-fixture-trace-b-0002",
+    "source": "ledger-json-api",
+    "sourceUrl": "http://localhost:7575/v2/updates/update-by-id",
+    "projection": {
+      "source": "ledger-json-api",
+      "participantScoped": true,
+      "readAs": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+      "notGlobal": true,
+      "note": "Authorized participant projection. Private data outside these party rights is not available."
+    },
+    "recordTime": "2024-01-15T10:01:55Z",
+    "offset": "202",
+    "synchronizerId": "synchronizer::sync0000000000000000000000000000000000000000000001",
+    "rootEventIds": ["#2:0"],
+    "eventsById": {
+      "#2:0": {
+        "eventId": "#2:0",
+        "kind": "exercise",
+        "template": "pkg2ccdd:Token:Token",
+        "contractId": "00ccddee001122334455667788990011ccddee001122334455667788990011cc",
+        "choice": "Transfer",
+        "consuming": true,
+        "actingParties": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+        "witnesses": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001", "Bob::bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000002"],
+        "signatories": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+        "observers": ["Bob::bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000002"],
+        "childEventIds": ["#2:1"],
+        "payload": null,
+        "argument": {"newOwner": "Bob::bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000002"},
+        "result": null
+      },
+      "#2:1": {
+        "eventId": "#2:1",
+        "kind": "create",
+        "template": "pkg2ccdd:Token:Token",
+        "contractId": "00ccddee001122334455667788990011ccddee001122334455667788990022dd",
+        "choice": null,
+        "consuming": null,
+        "actingParties": [],
+        "witnesses": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001", "Bob::bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000002"],
+        "signatories": ["Bob::bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000002"],
+        "observers": [],
+        "childEventIds": [],
+        "payload": {"owner": "Bob::bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb000002"},
+        "argument": null,
+        "result": null
+      }
+    }
+  },
+  "participant": {
+    "ledgerUrl": "http://localhost:7575",
+    "scanUrl": null,
+    "readAs": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"]
+  },
+  "packages": {
+    "available": false,
+    "packageIds": ["pkg2ccdd"],
+    "darPaths": [],
+    "debugInfoPaths": [],
+    "missingDarPaths": [],
+    "missingDebugInfoPaths": [],
+    "status": "package ids captured; package/source metadata must be supplied by local project or registry"
+  },
+  "privacy": {
+    "scope": "Authorized participant projection.",
+    "readAs": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+    "missingPrivateDataPolicy": "private data outside this participant projection is not present in the artifact"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "commandId": "dpm-trace-fail-001",
+  "submissionId": "dpm-trace-fixture-sub-fail-001",
+  "offset": "99",
+  "status": {
+    "code": "FAILED_PRECONDITION",
+    "message": "count must be non-negative"
+  }
+}

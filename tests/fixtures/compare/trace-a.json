@@ -1,0 +1,58 @@
+{
+  "schema": "dpm-trace/trace-artifact/v0",
+  "createdAt": "2024-01-15T10:01:00Z",
+  "kind": "committed-update",
+  "trace": {
+    "updateId": "update-fixture-trace-a-0001",
+    "source": "ledger-json-api",
+    "sourceUrl": "http://localhost:7575/v2/updates/update-by-id",
+    "projection": {
+      "source": "ledger-json-api",
+      "participantScoped": true,
+      "readAs": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+      "notGlobal": true,
+      "note": "Authorized participant projection. Private data outside these party rights is not available."
+    },
+    "recordTime": "2024-01-15T10:00:55Z",
+    "offset": "101",
+    "synchronizerId": "synchronizer::sync0000000000000000000000000000000000000000000001",
+    "rootEventIds": ["#1:0"],
+    "eventsById": {
+      "#1:0": {
+        "eventId": "#1:0",
+        "kind": "create",
+        "template": "pkg1aabb:Counter:Counter",
+        "contractId": "00aabbcc001122334455667788990011aabbcc001122334455667788990011aa",
+        "choice": null,
+        "consuming": null,
+        "actingParties": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+        "witnesses": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+        "signatories": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+        "observers": [],
+        "childEventIds": [],
+        "payload": {"owner": "Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001", "count": 0},
+        "argument": null,
+        "result": null
+      }
+    }
+  },
+  "participant": {
+    "ledgerUrl": "http://localhost:7575",
+    "scanUrl": null,
+    "readAs": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"]
+  },
+  "packages": {
+    "available": false,
+    "packageIds": ["pkg1aabb"],
+    "darPaths": [],
+    "debugInfoPaths": [],
+    "missingDarPaths": [],
+    "missingDebugInfoPaths": [],
+    "status": "package ids captured; package/source metadata must be supplied by local project or registry"
+  },
+  "privacy": {
+    "scope": "Authorized participant projection.",
+    "readAs": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+    "missingPrivateDataPolicy": "private data outside this participant projection is not present in the artifact"
+  }
+}

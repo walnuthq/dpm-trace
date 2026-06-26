@@ -1,0 +1,37 @@
+{
+  "committed": false,
+  "createdAt": "2026-06-25T09:28:57.462919Z",
+  "kind": "prepared-command",
+  "participant": {
+    "actAs": [
+      "Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"
+    ],
+    "readAs": []
+  },
+  "privacy": {
+    "missingPrivateDataPolicy": "counterparty-private data outside this authorization context is not present in the artifact",
+    "scope": "Prepared command result from an authorized participant endpoint."
+  },
+  "request": {
+    "commandId": "dpm-trace-prepare-001",
+    "commands": [
+      {
+        "CreateCommand": {
+          "templateId": "pkg1aabb:Counter:Counter",
+          "createArguments": {
+            "owner": "Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001",
+            "count": 0
+          }
+        }
+      }
+    ],
+    "actAs": ["Alice::aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000001"],
+    "readAs": []
+  },
+  "response": {
+    "preparedTransactionHash": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+  },
+  "schema": "dpm-trace/prepared-artifact/v0",
+  "source": "ledger-json-api",
+  "sourceUrl": "http://localhost:7575/v2/interactive-submission/prepare"
+}
