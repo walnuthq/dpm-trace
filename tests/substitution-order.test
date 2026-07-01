@@ -1,0 +1,5 @@
+# Pin the %ledger2-before-%ledger substitution ordering invariant in the
+# scaffolder's generated lit.cfg.py. Runs without a Daml toolchain.
+# RUN: %python %root/tests/check-substitution-order.py %root | FileCheck %s
+
+# CHECK: substitution-order checks passed
