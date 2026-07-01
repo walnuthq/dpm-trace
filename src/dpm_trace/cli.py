@@ -149,6 +149,7 @@ def build_trace_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export", "--out", dest="export", help="Write a portable trace artifact JSON file.")
     parser.add_argument("--print-json", action="store_true", help="Print normalized trace JSON and exit.")
     parser.add_argument("--explain-apis", action="store_true", help="Explain Scan API vs Ledger API.")
+    parser.add_argument("--max-source-locations", type=int, default=5, help="Maximum source diagnostics to resolve for a failed completion. Defaults to 5; raise to see more.")
     return parser
 
 
@@ -438,6 +439,7 @@ def compare_main(argv: list[str]) -> int:
     add_common_connection_args(parser)
     parser.add_argument("--act-as", action="append", default=[], help="Submitting party for completion lookup. Repeatable.")
     parser.add_argument("--print-json", action="store_true", help="Print machine-readable comparison JSON.")
+    parser.add_argument("--max-source-locations", type=int, default=5, help="Maximum source diagnostics to resolve for a prepared-vs-completion diff. Defaults to 5.")
     args = parser.parse_args(argv)
     try:
         return run_compare(args)
@@ -457,6 +459,7 @@ class TestCaseResult:
     stats: dict[str, int] = field(default_factory=dict)
     touched_locations: list[str] = field(default_factory=list)
     diagnostics: list[SourceLocation] = field(default_factory=list)
+    diagnostics_capped: bool = False
 
 
 def test_main(argv: list[str]) -> int:
@@ -484,6 +487,7 @@ def test_main(argv: list[str]) -> int:
     parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--config", help="Trace config JSON. Defaults to .dpm-trace.json found in the current directory or a parent.")
     parser.add_argument("--color", choices=["auto", "always", "never"], default="auto")
+    parser.add_argument("--max-source-locations", type=int, default=6, help="Maximum source locations to resolve per failed test. Defaults to 6; raise to see more.")
     # Integration mode: run an lit suite against a managed local Canton node.
     parser.add_argument("--integration", metavar="DIR", help="Run an lit integration suite against a managed local Canton node instead of unit tests.")
     parser.add_argument("--canton-jar", help="Canton jar for --integration. Defaults to $DPM_TRACE_CANTON_JAR.")
@@ -565,7 +569,11 @@ def run_test(args: argparse.Namespace) -> int:
                 else:
                     case.stats = summary_stats.get(case.name, {})
             else:
-                case.diagnostics = test_failure_locations(case.message or "", source_index)
+                case.diagnostics, case.diagnostics_capped = test_failure_locations(
+                    case.message or "",
+                    source_index,
+                    max_source_locations=getattr(args, "max_source_locations", 6),
+                )
 
         if getattr(args, "junit", None):
             shutil.copyfile(junit_path, args.junit)
@@ -1204,22 +1212,36 @@ def transaction_locations(text: str) -> list[str]:
     return seen
 
 
-def test_failure_locations(message: str, source_index: SourceIndex) -> list[SourceLocation]:
+def test_failure_locations(
+    message: str,
+    source_index: SourceIndex,
+    max_source_locations: int = 6,
+) -> tuple[list[SourceLocation], bool]:
     """Resolve a failed test's message to source.
 
     Daml usually stamps the submit call site as Module:line:col (the "where"); the
     message body often also carries the assertMsg/abort literal that caused the
     rejection, which we match back into source (typically the contract — the "why").
     We surface both, call sites first.
+
+    Returns ``(locations, capped)`` where ``capped`` is True when additional
+    candidate locations were found beyond ``max_source_locations`` (so callers can
+    surface that the list was truncated rather than exhaustive).
     """
     locations: list[SourceLocation] = []
     seen: set[tuple[str, int, int]] = set()
+    capped = False
 
     def add(loc: SourceLocation) -> None:
+        nonlocal capped
         key = (loc.path, loc.line, loc.column)
-        if key not in seen:
-            seen.add(key)
-            locations.append(loc)
+        if key in seen:
+            return
+        seen.add(key)
+        if len(locations) >= max_source_locations:
+            capped = True
+            return
+        locations.append(loc)
 
     # Explicit Module:line[:col] coordinates that Daml puts in the message (call sites).
     for match in re.finditer(r"([A-Za-z0-9_.']+):(\d+)(?::(\d+))?", message or ""):
@@ -1236,9 +1258,7 @@ def test_failure_locations(message: str, source_index: SourceIndex) -> list[Sour
     for needle in completion_source_needles(strip_canton_error_decoration(message or "")):
         for loc in source_index.find_failure_text(needle):
             add(loc)
-            if len(locations) >= 6:
-                return locations[:6]
-    return locations[:6]
+    return locations, capped
 
 
 def strip_canton_error_decoration(message: str) -> str:
@@ -1316,7 +1336,9 @@ def print_test_report(
             for loc in case.diagnostics:
                 snippet = render_source_diagnostic(loc, source_index, color)
                 print(textwrap.indent(snippet, "        "))
-            if not case.diagnostics:
+            if case.diagnostics_capped:
+                print(f"        {color.apply('source:', 'gray')} (capped at {len(case.diagnostics)} locations; pass --max-source-locations to raise)")
+            elif not case.diagnostics:
                 print(f"        {color.apply('source:', 'gray')} no matching local source found")
 
     if not getattr(args, "no_trees", False):
@@ -1397,7 +1419,12 @@ def run_trace(args: argparse.Namespace) -> int:
         if args.print_json:
             print(json.dumps(completion, indent=2, sort_keys=True))
             return 0
-        print_completion_trace(completion, color=Color.from_mode(args.color), source_index=source_index_from_args(args, None))
+        print_completion_trace(
+            completion,
+            color=Color.from_mode(args.color),
+            source_index=source_index_from_args(args, None),
+            max_source_locations=getattr(args, "max_source_locations", 5),
+        )
         if args.visualize:
             print("")
             print("No transaction tree is available from completion data alone. Use dpm trace <update-id> if the completion includes an update id.")
@@ -1518,7 +1545,7 @@ def run_compare(args: argparse.Namespace) -> int:
     if args.print_json:
         print(json.dumps(comparison, indent=2, sort_keys=True))
         return 0
-    print_comparison(comparison, color, source_index=source_index_from_args(args, None))
+    print_comparison(comparison, color, source_index=source_index_from_args(args, None), max_source_locations=getattr(args, "max_source_locations", 5))
     return 0
 
 
@@ -1971,7 +1998,12 @@ def event_templates(trace: NormalizedTrace) -> set[str]:
     return {ev.template for ev in trace.events_by_id.values() if ev.template}
 
 
-def print_comparison(comparison: dict[str, Any], color: Color, source_index: SourceIndex | None = None) -> None:
+def print_comparison(
+    comparison: dict[str, Any],
+    color: Color,
+    source_index: SourceIndex | None = None,
+    max_source_locations: int = 5,
+) -> None:
     kind = comparison.get("kind")
     if kind == "update-vs-update":
         print_update_comparison(comparison, color)
@@ -1980,7 +2012,7 @@ def print_comparison(comparison: dict[str, Any], color: Color, source_index: Sou
         print_prepared_update_comparison(comparison, color)
         return
     if kind == "prepared-vs-completion":
-        print_prepared_completion_comparison(comparison, color, source_index=source_index)
+        print_prepared_completion_comparison(comparison, color, source_index=source_index, max_source_locations=max_source_locations)
         return
 
     print(color.apply("DPM trace comparison", "bold"))
@@ -2083,6 +2115,7 @@ def print_prepared_completion_comparison(
     comparison: dict[str, Any],
     color: Color,
     source_index: SourceIndex | None = None,
+    max_source_locations: int = 5,
 ) -> None:
     prepared = comparison.get("left") or {}
     completion = comparison.get("right") or {}
@@ -2110,12 +2143,14 @@ def print_prepared_completion_comparison(
     completion_for_diag = dict(completion)
     if status_code is not None:
         completion_for_diag["code"] = status_code
-    source_matches = completion_source_diagnostics(completion_for_diag, source_index)
+    source_matches, capped = completion_source_diagnostics(completion_for_diag, source_index, max_source_locations)
     if source_matches:
         print("")
         print(color.apply("Source diagnostics", "cyan", "bold"))
         for loc in source_matches:
             print(indent_text(render_source_diagnostic(loc, source_index, color)))
+        if capped:
+            print(f"  {color.apply('(capped at ' + str(len(source_matches)) + ' locations; pass --max-source-locations to raise)', 'gray')}")
     log_matches = diff.get("logMatches") or []
     if log_matches:
         print("")
@@ -2129,7 +2164,12 @@ def print_prepared_completion_comparison(
             print(f"  ... {len(log_matches) - 8} more")
 
 
-def print_completion_trace(completion: dict[str, Any], color: Color, source_index: SourceIndex | None = None) -> None:
+def print_completion_trace(
+    completion: dict[str, Any],
+    color: Color,
+    source_index: SourceIndex | None = None,
+    max_source_locations: int = 5,
+) -> None:
     status_code, message = completion_status_fields(completion)
     update_id = pick(completion, "updateId", "update_id")
     committed = bool(update_id)
@@ -2149,12 +2189,14 @@ def print_completion_trace(completion: dict[str, Any], color: Color, source_inde
         print(f"  source:     {completion.get('source') or '-'}")
     if not update_id:
         print("  trace:      no committed transaction tree is available for this completion")
-    source_matches = completion_source_diagnostics(completion, source_index)
+    source_matches, capped = completion_source_diagnostics(completion, source_index, max_source_locations)
     if source_matches:
         print("")
         print(color.apply("Source diagnostics", "cyan", "bold"))
         for loc in source_matches:
             print(indent_text(render_source_diagnostic(loc, source_index, color)))
+        if capped:
+            print(f"  {color.apply('(capped at ' + str(len(source_matches)) + ' locations; pass --max-source-locations to raise)', 'gray')}")
     log_matches = completion.get("logMatches") or []
     if log_matches:
         print("")
@@ -2182,23 +2224,31 @@ def completion_result(committed: bool, failed: bool, color: Color) -> str:
     return color.apply("completion status available", "yellow", "bold")
 
 
-def completion_source_diagnostics(completion: dict[str, Any], source_index: SourceIndex | None) -> list[SourceLocation]:
+def completion_source_diagnostics(
+    completion: dict[str, Any],
+    source_index: SourceIndex | None,
+    max_source_locations: int = 5,
+) -> tuple[list[SourceLocation], bool]:
     if source_index is None or not source_index.files:
-        return []
+        return [], False
     _, message = completion_status_fields(completion)
     needles = completion_source_needles(str(message or ""))
     seen: set[tuple[str, int, int]] = set()
     result: list[SourceLocation] = []
+    capped = False
     for needle in needles:
         for loc in source_index.find_failure_text(needle):
             key = (loc.path, loc.line, loc.column)
             if key in seen:
                 continue
             seen.add(key)
+            if len(result) >= max_source_locations:
+                capped = True
+                break
             result.append(loc)
-            if len(result) >= 5:
-                return result
-    return result
+        if capped:
+            break
+    return result, capped
 
 
 def completion_source_needles(message: str) -> list[str]:

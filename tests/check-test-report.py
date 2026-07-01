@@ -21,6 +21,7 @@ def main() -> int:
     from dpm_trace.cli import (  # noqa: E402
         SourceIndex,
         _eval_replay,
+        completion_source_diagnostics,
         parse_junit,
         register_component_in_manifest,
         strip_canton_error_decoration,
@@ -82,7 +83,7 @@ def main() -> int:
     # 4. Failure -> source mapping (explicit call site + assertMsg literal).
     index = SourceIndex(source_roots=[str(fixtures)])
     message = f"Script execution failed on commit at Sample:9:5: {decorated}"
-    mapped = test_failure_locations(message, index)
+    mapped, capped = test_failure_locations(message, index)
     sample_lines = (fixtures / "Sample.daml").read_text(encoding="utf-8").splitlines()
     explicit = any(Path(m.path).name == "Sample.daml" and m.line == 9 for m in mapped)
     literal = any(
@@ -93,6 +94,20 @@ def main() -> int:
     )
     check(explicit, f"explicit Sample:9 location not resolved: {[(Path(m.path).name, m.line) for m in mapped]}")
     check(literal, f"assertMsg literal not mapped into source: {[(Path(m.path).name, m.line) for m in mapped]}")
+
+    # 4b. The cap is configurable and signals when more locations were available.
+    small, small_capped = test_failure_locations(message, index, max_source_locations=1)
+    check(len(small) <= 1, f"max_source_locations=1 should return at most 1: {len(small)}")
+    check(small_capped, f"max_source_locations=1 should flag capping: {small}")
+
+    # 4c. completion_source_diagnostics honors the cap and signals truncation.
+    diag_index = SourceIndex(source_roots=[str(fixtures)])
+    completion = {"status": {"code": 9, "message": 'AssertionFailed: "sample boundary violated"'}}
+    full, full_capped = completion_source_diagnostics(completion, diag_index)
+    one, one_capped = completion_source_diagnostics(completion, diag_index, max_source_locations=1)
+    check(bool(full), "completion_source_diagnostics should resolve the Sample fixture")
+    check(len(one) <= 1, f"completion cap=1 should return at most 1: {len(one)}")
+    check(one_capped, f"completion cap=1 should flag capping when full had {len(full)}")
 
     # 5. install-plugin: the component registers under `components:` (before `assistant:`).
     manifest = Path(tempfile.mkstemp(suffix=".yaml")[1])
