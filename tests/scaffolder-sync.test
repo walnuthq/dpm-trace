@@ -1,5 +1,6 @@
 # Enforce that the scaffolder's embedded itests/ text matches the canonical
 # sibling daml-tests/itests/ files. Skips (exit 0) when the sibling is absent.
+# The FileCheck pattern accepts both sync success and the intentional skip path.
 # RUN: %python %root/tests/check-scaffolder-sync.py %root | FileCheck %s
 
-# CHECK: scaffolder-sync checks passed
+# CHECK: scaffolder-sync checks {{passed|skipped}}

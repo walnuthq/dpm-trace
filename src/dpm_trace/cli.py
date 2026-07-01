@@ -1398,6 +1398,8 @@ def test_report_json(
                     {"path": loc.path, "line": loc.line, "column": loc.column, "basis": loc.label}
                     for loc in case.diagnostics
                 ],
+                "diagnosticsCapped": case.diagnostics_capped,
+                "maxSourceLocations": getattr(args, "max_source_locations", None),
                 "transactions": case.transactions_text,
             }
             for case in cases
@@ -3912,7 +3914,12 @@ def _eval_replay(expr: str, env: dict[str, Any]) -> tuple[Any, bool, str | None]
     caller can label the step "not evaluated" instead of presenting a missing
     result as a faithful replay outcome).
     """
-    result = eval_daml_expression(expr, env)
+    try:
+        result = eval_daml_expression(expr, env)
+    except (TypeError, ValueError):
+        if expr.strip():
+            return None, False, "unsupported expression; not evaluated (replay supports lookup/int/string/+/-)"
+        return None, True, None
     if result is None and expr.strip():
         return None, False, "unsupported expression; not evaluated (replay supports lookup/int/string/+/-)"
     return result, True, None

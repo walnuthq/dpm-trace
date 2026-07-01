@@ -7,5 +7,3 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 tests/.lit/
-docs/REAL-UPDATE-SMOKE.md
-docs/TECHNICAL-NOTES.md

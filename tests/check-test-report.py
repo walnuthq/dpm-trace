@@ -15,6 +15,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def main() -> int:
@@ -25,6 +26,7 @@ def main() -> int:
     sys.path.insert(0, str(repo_root / "src"))
     from dpm_trace.cli import (  # noqa: E402
         SourceIndex,
+        TestCaseResult,
         _eval_replay,
         completion_source_diagnostics,
         daml_child_env,
@@ -33,6 +35,7 @@ def main() -> int:
         parse_junit,
         register_component_in_manifest,
         strip_canton_error_decoration,
+        test_report_json,
         test_failure_locations,
         transaction_html_to_text,
         transaction_locations,
@@ -107,6 +110,23 @@ def main() -> int:
     small, small_capped = test_failure_locations(message, index, max_source_locations=1)
     check(len(small) <= 1, f"max_source_locations=1 should return at most 1: {len(small)}")
     check(small_capped, f"max_source_locations=1 should flag capping: {small}")
+    report = test_report_json(
+        SimpleNamespace(max_source_locations=1),
+        fixtures,
+        ["daml", "test"],
+        [
+            TestCaseResult(
+                name="bad",
+                classname="Sample",
+                status="failed",
+                diagnostics=small,
+                diagnostics_capped=small_capped,
+            )
+        ],
+    )
+    test_entry = report["tests"][0]
+    check(test_entry.get("diagnosticsCapped") is True, f"JSON report did not expose capped diagnostics: {test_entry}")
+    check(test_entry.get("maxSourceLocations") == 1, f"JSON report did not expose source cap: {test_entry}")
 
     # 4c. completion_source_diagnostics honors the cap and signals truncation.
     diag_index = SourceIndex(source_roots=[str(fixtures)])
@@ -261,6 +281,11 @@ def main() -> int:
     check(plus == (5, True, None), f"2+3 should evaluate: {plus}")
     star = _eval_replay("a * b", {"a": 2, "b": 3})
     check(star[0] is None and star[1] is False, f"`*` should be flagged not evaluated: {star}")
+    projection = _eval_replay("this.amount + delta", {"this": {"amount": 2}, "delta": 1})
+    check(
+        projection[0] is None and projection[1] is False,
+        f"projection plus arithmetic should be flagged not evaluated, not raise: {projection}",
+    )
     lookup = _eval_replay("owner", {"owner": "Alice"})
     check(lookup == ("Alice", True, None), f"env lookup should evaluate: {lookup}")
     empty = _eval_replay("   ", {})

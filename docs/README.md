@@ -4,21 +4,16 @@ User-facing documentation for `dpm trace`.
 
 ## Index
 
-- [`integration-tests.md`](integration-tests.md) — running `dpm trace test --integration` against a managed local Canton (prerequisites, the `--init` → `--integration` loop, lit substitutions).
+- [`integration-tests.md`](integration-tests.md) - running `dpm trace test --integration` against a managed local Canton.
+- [`REAL-UPDATE-SMOKE.md`](REAL-UPDATE-SMOKE.md) - redacted real-Canton smoke-test checklist with placeholders.
+- [`TECHNICAL-NOTES.md`](TECHNICAL-NOTES.md) - implementation notes for the trace/test proof of concept.
 
-## Local-only notes (intentionally not committed)
+## Path Hygiene
 
-Two working notes are gitignored and live only on the author's machine:
+Docs must not contain local machine paths, usernames, hostnames, or personal temp
+paths. Use placeholders such as `<path-to-daml-project>`,
+`<path-to-canton.jar>`, `<path-to-daml-helper>`, `<package-dir>`, and
+`<party-id>`.
 
-- `docs/REAL-UPDATE-SMOKE.md`
-- `docs/TECHNICAL-NOTES.md`
-
-They are excluded because they contain local machine paths / environment
-details that cannot be committed under this repo's path-hygiene rule (see
-`tests/forbidden-markers.txt` and `AGENTS.md`). The gap is recorded here so
-the knowledge is not silently lost: anyone who needs that content should
-either (a) commit a redacted version with placeholders such as
-`<path-to-canton.jar>` / `<party-id>`, or (b) move it into an external store
-the team owns and link it from this file.
-
-If you add a committed doc, add it to the index above.
+If a local-only note is useful to future maintainers, commit a redacted version
+here or link to a team-owned external location from this index.

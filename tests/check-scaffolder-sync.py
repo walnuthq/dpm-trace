@@ -34,8 +34,8 @@ def main() -> int:
     cfg = sibling / "itests" / "lit.cfg.py"
     if not cfg.is_file():
         print(
-            f"scaffolder-sync: sibling daml-tests/itests/lit.cfg.py not found at "
-            f"{cfg}, skipping (set DPM_TRACE_DAML_TESTS_DIR to enable)."
+            f"scaffolder-sync checks skipped: sibling daml-tests/itests/lit.cfg.py "
+            f"not found at {cfg} (set DPM_TRACE_DAML_TESTS_DIR to enable)."
         )
         return 0
 
@@ -57,4 +57,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
