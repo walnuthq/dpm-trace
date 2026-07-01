@@ -2452,21 +2452,31 @@ def print_argument_field_diff(command: dict[str, Any], root: dict[str, Any], col
         return
     if not isinstance(command_value, dict) or not isinstance(root_value, dict):
         if comparable_value(command_value) == comparable_value(root_value):
-            print(f"    {label}: {compact_value(command_value)} {color.apply('match', 'green')}")
+            print(color.apply(f"    {label}: {compact_value(command_value)} match", "dim"))
         else:
-            print(f"    {label}: prepared={compact_value(command_value)}, committed={compact_value(root_value)} {color.apply('differ', 'yellow')}")
+            print(f"    {label}:")
+            print(f"      {color.apply('< ' + compact_value(command_value), 'yellow')}  (prepared)")
+            print(f"      {color.apply('> ' + compact_value(root_value), 'yellow')}  (committed)")
         return
     keys = sorted(set(command_value) | set(root_value))
     if not keys:
         return
+    differ_keys = [k for k in keys if comparable_value(command_value.get(k, "<missing>")) != comparable_value(root_value.get(k, "<missing>"))]
+    match_keys = [k for k in keys if k not in differ_keys]
     print(f"    {label}:")
-    for key in keys:
-        pval = command_value.get(key, "<missing>")
-        cval = root_value.get(key, "<missing>")
-        if comparable_value(pval) == comparable_value(cval):
-            print(f"      {key}: {compact_value(pval)} {color.apply('match', 'green')}")
-        else:
-            print(f"      {key}: prepared={compact_value(pval)}, committed={compact_value(cval)} {color.apply('differ', 'yellow')}")
+    if differ_keys:
+        print(f"      {color.apply('(differs)', 'red')}")
+        for key in differ_keys:
+            pval = command_value.get(key, "<missing>")
+            cval = root_value.get(key, "<missing>")
+            print(f"        {key}:")
+            print(f"          prepared:  {color.apply(compact_value(pval), 'yellow')}")
+            print(f"          committed: {color.apply(compact_value(cval), 'yellow')}")
+    if match_keys:
+        print(color.apply(f"      (matches)", "dim"))
+        for key in match_keys:
+            pval = command_value.get(key, "<missing>")
+            print(color.apply(f"        {key}: {compact_value(pval)}", "dim"))
 
 
 def print_party_fields(root: dict[str, Any]) -> None:
