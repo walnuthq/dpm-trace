@@ -1,0 +1,17 @@
+# Exercises print_prepared_completion_comparison: full completion field set
+# including trace context and synchronizer time.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli compare --prepared %root/tests/fixtures/compare/prepared.json --completion-file %root/tests/fixtures/compare/completion-fail.json --color never | FileCheck %s
+
+# CHECK: DPM trace comparison
+# CHECK: kind:   prepared-vs-completion
+# CHECK: Prepared command
+# CHECK: command id: dpm-trace-prepare-001
+# CHECK: Completion
+# CHECK: command id: dpm-trace-fail-001
+# CHECK: submission: dpm-trace-fixture-sub-fail-001
+# CHECK: offset:     99
+# CHECK: status:     FAILED_PRECONDITION
+# CHECK: message:    count must be non-negative
+# CHECK: spanId:  aabbccdd11223344
+# CHECK: traceId:  aabbccdd11223344aabbccdd11223344
+# CHECK: sync time:  2026-06-28T10:00:55Z

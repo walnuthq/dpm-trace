@@ -1877,21 +1877,26 @@ def compare_prepared_to_trace(prepared: dict[str, Any], trace: NormalizedTrace) 
 
 def compare_prepared_to_completion(prepared: dict[str, Any], completion: dict[str, Any]) -> dict[str, Any]:
     code, message = completion_status_fields(completion)
+    prepared_cmd_id = (prepared.get("request") or {}).get("commandId")
+    completion_cmd_id = pick(completion, "commandId", "command_id")
     return {
         "kind": "prepared-vs-completion",
         "left": prepared_summary_for_compare(prepared),
         "right": {
-            "commandId": pick(completion, "commandId", "command_id"),
+            "commandId": completion_cmd_id,
             "updateId": pick(completion, "updateId", "update_id"),
             "offset": pick(completion, "offset"),
             "submissionId": pick(completion, "submissionId", "submission_id"),
             "statusCode": code,
             "message": message,
             "source": completion.get("source"),
+            "traceContext": completion.get("traceContext"),
+            "synchronizerTime": pick(completion, "synchronizerTime", "synchronizer_time"),
             "logMatches": completion.get("logMatches") or [],
         },
         "diff": {
             "committedUpdateAvailable": bool(pick(completion, "updateId", "update_id")),
+            "commandIdMatch": bool(prepared_cmd_id and prepared_cmd_id == completion_cmd_id),
             "logMatches": completion.get("logMatches") or [],
         },
     }
@@ -1974,6 +1979,11 @@ def event_compare_row(ev: TraceEvent) -> dict[str, Any]:
         "contractId": short(ev.contract_id, 48),
         "value": value,
         "valueLabel": value_label,
+        "result": ev.result if ev.kind == "exercise" else None,
+        "signatories": ev.signatories,
+        "observers": ev.observers,
+        "witnesses": ev.witnesses,
+        "actingParties": ev.acting_parties,
     }
 
 
@@ -2109,7 +2119,20 @@ def print_prepared_update_comparison(comparison: dict[str, Any], color: Color) -
     print("")
 
     print(color.apply("Field diff", "cyan", "bold"))
-    print_prepared_value_summary(first_command, first_root, color)
+    if not command_rows and not root_rows:
+        print("  no commands")
+    else:
+        for index in range(max(len(command_rows), len(root_rows))):
+            cmd = command_rows[index] if index < len(command_rows) else None
+            root = root_rows[index] if index < len(root_rows) else None
+            if cmd and root and command_event_key(cmd) == event_compare_key(root):
+                print(f"  [{index}] {command_row_text(cmd)}")
+                print_argument_field_diff(cmd, root, color)
+                print_party_fields(root)
+            elif cmd:
+                print(f"  [{index}] command only: {command_row_text(cmd)}")
+            else:
+                print(f"  [{index}] event only:   {event_row_text(root)}")
     print("")
 
     print(color.apply("Context", "cyan", "bold"))
@@ -2149,12 +2172,25 @@ def print_prepared_completion_comparison(
     print("")
 
     print(color.apply("Completion", "cyan", "bold"))
-    print(f"  command id: {completion.get('commandId') or '-'}")
+    completion_cmd_id = completion.get("commandId")
+    cmd_id_match = bool(diff.get("commandIdMatch"))
+    cmd_id_marker = f" {color.apply('match', 'green')}" if cmd_id_match else ""
+    print(f"  command id: {completion_cmd_id or '-'}{cmd_id_marker}")
     print(f"  submission: {completion.get('submissionId') or '-'}")
     print(f"  update id:  {short(str(completion.get('updateId') or '-'), 80)}")
     print(f"  offset:     {completion.get('offset') or '-'}")
     print(f"  status:     {status_code if status_code is not None else '-'}")
     print(f"  message:    {completion.get('message') or '-'}")
+    trace_context = completion.get("traceContext")
+    if isinstance(trace_context, dict):
+        for tc_key, tc_val in sorted(trace_context.items()):
+            if tc_val:
+                print(f"  {tc_key}:  {short(str(tc_val), 80)}")
+    elif trace_context is not None:
+        print(f"  trace context: {compact_value(trace_context)}")
+    sync_time = completion.get("synchronizerTime")
+    if sync_time is not None:
+        print(f"  sync time:  {sync_time}")
     completion_for_diag = dict(completion)
     if status_code is not None:
         completion_for_diag["code"] = status_code
@@ -2406,6 +2442,56 @@ def print_prepared_value_summary(command: dict[str, Any] | None, root: dict[str,
         return
     for line in prepared_committed_field_diffs(prepared_value, committed_value):
         print(f"  {color.apply(line, 'yellow')}")
+
+
+def print_argument_field_diff(command: dict[str, Any], root: dict[str, Any], color: Color) -> None:
+    command_value = command.get("value")
+    root_value = root.get("value")
+    label = command.get("valueLabel") or "value"
+    if command_value is None and root_value is None:
+        return
+    if not isinstance(command_value, dict) or not isinstance(root_value, dict):
+        if comparable_value(command_value) == comparable_value(root_value):
+            print(color.apply(f"    {label}: {compact_value(command_value)} match", "dim"))
+        else:
+            print(f"    {label}:")
+            print(f"      {color.apply('< ' + compact_value(command_value), 'yellow')}  (prepared)")
+            print(f"      {color.apply('> ' + compact_value(root_value), 'yellow')}  (committed)")
+        return
+    keys = sorted(set(command_value) | set(root_value))
+    if not keys:
+        return
+    differ_keys = [k for k in keys if comparable_value(command_value.get(k, "<missing>")) != comparable_value(root_value.get(k, "<missing>"))]
+    match_keys = [k for k in keys if k not in differ_keys]
+    print(f"    {label}:")
+    if differ_keys:
+        print(f"      {color.apply('(differs)', 'red')}")
+        for key in differ_keys:
+            pval = command_value.get(key, "<missing>")
+            cval = root_value.get(key, "<missing>")
+            print(f"        {key}:")
+            print(f"          prepared:  {color.apply(compact_value(pval), 'yellow')}")
+            print(f"          committed: {color.apply(compact_value(cval), 'yellow')}")
+    if match_keys:
+        print(color.apply(f"      (matches)", "dim"))
+        for key in match_keys:
+            pval = command_value.get(key, "<missing>")
+            print(color.apply(f"        {key}: {compact_value(pval)}", "dim"))
+
+
+def print_party_fields(root: dict[str, Any]) -> None:
+    act = root.get("actingParties") or []
+    sig = root.get("signatories") or []
+    obs = root.get("observers") or []
+    wit = root.get("witnesses") or []
+    if act:
+        print(f"    acting:      {party_list_summary(act)}")
+    if sig:
+        print(f"    signatories: {party_list_summary(sig)}")
+    if obs:
+        print(f"    observers:   {party_list_summary(obs)}")
+    if wit:
+        print(f"    witnesses:   {party_list_summary(wit)}")
 
 
 def prepared_committed_field_diffs(prepared: Any, committed: Any) -> list[str]:

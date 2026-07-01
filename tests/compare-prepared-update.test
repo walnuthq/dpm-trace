@@ -1,0 +1,16 @@
+# Exercises print_prepared_update_comparison: per-field argument diffs and
+# party fields (acting, signatories, witnesses) from the committed event.
+# RUN: %python %root/tests/check-compare-field-diffs.py | FileCheck %s
+
+# CHECK: DPM trace comparison
+# CHECK: kind:   prepared-vs-update
+# CHECK: Field diff
+# CHECK: [0] CREATE Counter:Counter
+# CHECK: arguments:
+# CHECK: count: 0 match
+# CHECK: owner:{{.*}}match
+# CHECK: acting:{{.*}}Alice
+# CHECK: signatories:{{.*}}Alice
+# CHECK: witnesses:{{.*}}Alice
+# CHECK: Context
+# CHECK: command id: dpm-trace-prepare-001
