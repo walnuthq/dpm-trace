@@ -287,7 +287,7 @@ def run_submit(args: argparse.Namespace) -> int:
         print(update_id or json.dumps(response))
         return 0
 
-    response = http_json("POST", url, body=request, token=token)
+    response = http_json("POST", url, body=request, token=token, retry=False)
     if args.print_json:
         print(json.dumps(response, indent=2, sort_keys=True))
         return 0
@@ -2813,7 +2813,31 @@ def package_metadata_context(dar_paths: list[str], debug_info_paths: list[str], 
     }
 
 
-def http_json(method: str, url: str, body: dict[str, Any] | None = None, token: str | None = None) -> Any:
+HTTP_RETRY_ATTEMPTS = 3
+HTTP_RETRY_BACKOFF_SECONDS = 0.3  # doubled per attempt: 0.3, 0.6
+
+
+def _is_transient_http_error(exc: BaseException) -> bool:
+    """True for failures a same-request retry can plausibly fix: 5xx responses
+    and connection-level errors (refused, timeout, DNS). 4xx is not transient."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (500, 502, 503, 504)
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    return False
+
+
+def http_json(
+    method: str,
+    url: str,
+    body: dict[str, Any] | None = None,
+    token: str | None = None,
+    retry: bool = True,
+) -> Any:
+    """Fetch/POST JSON. With ``retry`` (default), retries transient failures
+    (5xx and connection errors) up to ``HTTP_RETRY_ATTEMPTS`` times with
+    exponential backoff, distinct from the ingestion ``--wait`` loop. Pass
+    ``retry=False`` for non-idempotent calls (e.g. submit-and-wait)."""
     data = None
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -2822,14 +2846,20 @@ def http_json(method: str, url: str, body: dict[str, Any] | None = None, token: 
     if token:
         headers["Authorization"] = f"Bearer {token.strip()}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method} {url} failed with HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"{method} {url} failed: {exc.reason}") from exc
+    attempts = HTTP_RETRY_ATTEMPTS if retry else 1
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if not _is_transient_http_error(exc) or attempt == attempts - 1:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"{method} {url} failed with HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            if attempt == attempts - 1:
+                raise RuntimeError(f"{method} {url} failed: {exc.reason}") from exc
+        time.sleep(HTTP_RETRY_BACKOFF_SECONDS * (2 ** attempt))
+    raise RuntimeError(f"{method} {url} failed: exhausted retries")
 
 
 def http_post_allow_error(url: str, body: dict[str, Any], token: str | None = None) -> tuple[bool, Any]:

@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import sys
 import os
+import io
+import json
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -25,6 +29,7 @@ def main() -> int:
         completion_source_diagnostics,
         daml_child_env,
         find_config,
+        http_json,
         parse_junit,
         register_component_in_manifest,
         strip_canton_error_decoration,
@@ -157,6 +162,80 @@ def main() -> int:
         check(find_config(str(parent_config)) == parent_config, "explicit --config did not bypass the boundary walk")
     finally:
         os.chdir(cwd)
+
+    # 4f. http_json retries transient failures (5xx + connection errors) with
+    #     bounded backoff, distinct from the ingestion --wait loop, and does not
+    #     retry 4xx or when retry=False (e.g. submit-and-wait).
+    import dpm_trace.cli as _cli
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def _http_error(code):
+        return urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(b"{}"))
+
+    _orig_urlopen = urllib.request.urlopen
+    _orig_sleep = _cli.time.sleep
+    _cli.time.sleep = lambda seconds: None
+    try:
+        counter = {"n": 0}
+
+        def _then_200(req, timeout):
+            counter["n"] += 1
+            if counter["n"] == 1:
+                raise _http_error(503)
+            return _FakeResp()
+
+        urllib.request.urlopen = _then_200
+        counter["n"] = 0
+        ok = _cli.http_json("GET", "http://x")
+        check(ok == {"ok": True}, f"503-then-200 should succeed via retry: {ok}")
+        check(counter["n"] == 2, f"transient retry should use 2 attempts, got {counter['n']}")
+
+        def _always_503(req, timeout):
+            counter["n"] += 1
+            raise _http_error(503)
+
+        urllib.request.urlopen = _always_503
+        counter["n"] = 0
+        try:
+            _cli.http_json("GET", "http://x")
+            check(False, "persistent 503 should raise")
+        except RuntimeError:
+            pass
+        check(counter["n"] == 3, f"persistent 503 should exhaust 3 attempts, got {counter['n']}")
+
+        def _always_404(req, timeout):
+            counter["n"] += 1
+            raise _http_error(404)
+
+        urllib.request.urlopen = _always_404
+        counter["n"] = 0
+        try:
+            _cli.http_json("GET", "http://x")
+            check(False, "404 should raise")
+        except RuntimeError:
+            pass
+        check(counter["n"] == 1, f"404 should not be retried, got {counter['n']}")
+
+        urllib.request.urlopen = _always_503
+        counter["n"] = 0
+        try:
+            _cli.http_json("GET", "http://x", retry=False)
+            check(False, "retry=False should raise on 503")
+        except RuntimeError:
+            pass
+        check(counter["n"] == 1, f"retry=False should not retry, got {counter['n']}")
+    finally:
+        urllib.request.urlopen = _orig_urlopen
+        _cli.time.sleep = _orig_sleep
 
     # 5. install-plugin: the component registers under `components:` (before `assistant:`).
     manifest = Path(tempfile.mkstemp(suffix=".yaml")[1])
