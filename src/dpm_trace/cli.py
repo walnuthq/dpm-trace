@@ -30,6 +30,11 @@ LEDGER_SUBMIT_AND_WAIT_PATH = "/v2/commands/submit-and-wait"
 LEDGER_COMPLETIONS_PATH = "/v2/commands/completions"
 TRACE_ARTIFACT_SCHEMA = "dpm-trace/trace-artifact/v0"
 PREPARED_ARTIFACT_SCHEMA = "dpm-trace/prepared-artifact/v0"
+# Project boundary markers. `find_config` walks cwd up to and including the
+# nearest ancestor containing one of these, so a stray .dpm-trace.json in a
+# parent workspace cannot inject ledger/participant settings into an unrelated
+# subproject. An explicit --config bypasses the boundary.
+PROJECT_BOUNDARY_MARKERS = (".git", "daml.yaml", "component.yaml")
 
 
 @dataclass
@@ -2647,17 +2652,38 @@ def load_config(explicit_path: str | None) -> dict[str, Any]:
         raise ValueError(f"invalid JSON config {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"config must be a JSON object: {path}")
+    if not explicit_path and os.environ.get("DPM_TRACE_VERBOSE"):
+        print(f"dpm trace: using config {path}", file=sys.stderr)
     return data
 
 
 def find_config(explicit_path: str | None) -> Path | None:
+    """Locate the .dpm-trace.json config for the current directory.
+
+    An explicit path is honored as-is. Otherwise the walk starts at cwd and
+    climbs to and including the nearest project boundary (a directory holding
+    one of PROJECT_BOUNDARY_MARKERS), but never above it. If no boundary
+    marker is found, only the cwd is checked, so a config in an unrelated
+    parent workspace is never picked up.
+    """
     if explicit_path:
         return Path(explicit_path)
-    current = Path.cwd().resolve()
-    for directory in (current, *current.parents):
+    cwd = Path.cwd().resolve()
+    project_root = cwd
+    found_boundary = False
+    for directory in (cwd, *cwd.parents):
+        if any((directory / marker).exists() for marker in PROJECT_BOUNDARY_MARKERS):
+            project_root = directory
+            found_boundary = True
+            break
+    if not found_boundary:
+        project_root = cwd
+    for directory in (cwd, *cwd.parents):
         candidate = directory / ".dpm-trace.json"
         if candidate.exists():
             return candidate
+        if directory == project_root:
+            break
     return None
 
 

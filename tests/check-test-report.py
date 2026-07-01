@@ -24,6 +24,7 @@ def main() -> int:
         _eval_replay,
         completion_source_diagnostics,
         daml_child_env,
+        find_config,
         parse_junit,
         register_component_in_manifest,
         strip_canton_error_decoration,
@@ -131,6 +132,31 @@ def main() -> int:
     check("DPM_RESOLUTION_FILE" not in env, "daml_child_env did not drop DPM_RESOLUTION_FILE")
     check("utf" in env.get("LANG", "").lower(), f"daml_child_env did not force a UTF-8 LANG under C locale: {env.get('LANG')}")
     check("utf" in env.get("LC_ALL", "").lower(), f"daml_child_env did not force a UTF-8 LC_ALL under C locale: {env.get('LC_ALL')}")
+
+    # 4e. find_config bounds its upward walk at the nearest project boundary
+    #     marker so a parent workspace .dpm-trace.json cannot leak into an
+    #     unrelated subproject; an explicit path bypasses the boundary.
+    import json as _json
+    import tempfile as _tempfile
+    workspace = Path(_tempfile.mkdtemp()).resolve()
+    proj = workspace / "proj"
+    (proj / "pkg").mkdir(parents=True)
+    (proj / ".git").mkdir()
+    proj_config = proj / ".dpm-trace.json"
+    proj_config.write_text(_json.dumps({"ledgerUrl": "http://proj"}), encoding="utf-8")
+    parent_config = workspace / ".dpm-trace.json"
+    parent_config.write_text(_json.dumps({"ledgerUrl": "http://parent"}), encoding="utf-8")
+    cwd = Path.cwd().resolve()
+    try:
+        os.chdir(proj / "pkg")
+        check(find_config(None) == proj_config, "find_config did not pick up the in-project config from a subdir")
+        proj_config.unlink()
+        check(find_config(None) is None, "find_config crossed a .git boundary to a parent workspace config")
+        os.chdir(workspace)
+        check(find_config(None) == parent_config, "find_config did not fall back to cwd-only when no boundary marker is present")
+        check(find_config(str(parent_config)) == parent_config, "explicit --config did not bypass the boundary walk")
+    finally:
+        os.chdir(cwd)
 
     # 5. install-plugin: the component registers under `components:` (before `assistant:`).
     manifest = Path(tempfile.mkstemp(suffix=".yaml")[1])
