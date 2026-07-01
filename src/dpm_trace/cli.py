@@ -247,8 +247,10 @@ def submit_main(argv: list[str]) -> int:
     parser.add_argument("--arg", action="append", default=[], help="Set one argument field, e.g. --arg count=1. Repeatable.")
     parser.add_argument("--command-id", help="Command id. Defaults to dpm-trace-submit-<uuid>.")
     parser.add_argument("--user-id", help="Ledger API user id for the submission.")
-    parser.add_argument("--allow-fail", action="store_true", help="Do not error on a rejected submission; print the rejection (as JSON) so it can be traced.")
+    parser.add_argument("--allow-fail", action="store_true", help="Do not error on a rejected submission; print the rejection and exit 0.")
     parser.add_argument("--print-json", action="store_true", help="Print the full submit-and-wait response.")
+    parser.add_argument("--log-file", action="append", default=[], help="Operator/participant log file to search for failure correlation. Repeatable.")
+    parser.add_argument("--max-source-locations", type=int, default=5, help="Maximum source diagnostics to resolve for a failed submission. Defaults to 5.")
     args = parser.parse_args(argv)
     try:
         return run_submit(args)
@@ -277,17 +279,22 @@ def run_submit(args: argparse.Namespace) -> int:
         request["userId"] = user_id
 
     url = join_url(ledger_url, LEDGER_SUBMIT_AND_WAIT_PATH)
-    if getattr(args, "allow_fail", False):
-        ok, response = http_post_allow_error(url, request, token)
-        if args.print_json or not ok:
-            # On rejection the body is what callers trace with --completion-file.
-            print(json.dumps(response, indent=2, sort_keys=True))
-            return 0
-        update_id = response.get("updateId") if isinstance(response, dict) else None
-        print(update_id or json.dumps(response))
-        return 0
+    color = Color.from_mode(getattr(args, "color", "auto"))
+    ok, response = http_post_allow_error(url, request, token)
 
-    response = http_json("POST", url, body=request, token=token, retry=False)
+    if not ok:
+        if args.print_json:
+            print(json.dumps(response, indent=2, sort_keys=True))
+        else:
+            completion = dict(response) if isinstance(response, dict) else {}
+            completion.setdefault("commandId", request.get("commandId"))
+            completion.setdefault("submissionId", request.get("submissionId"))
+            completion = attach_log_matches(args, completion)
+            source_index = source_index_from_args(args, None)
+            max_locs = getattr(args, "max_source_locations", 5)
+            print_completion_trace(completion, color, source_index=source_index, max_source_locations=max_locs)
+        return 0 if getattr(args, "allow_fail", False) else 1
+
     if args.print_json:
         print(json.dumps(response, indent=2, sort_keys=True))
         return 0
