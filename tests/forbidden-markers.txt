@@ -1,0 +1,14 @@
+# Local machine path / user markers scanned across Git-visible files by
+# tests/check-no-local-paths.py. One marker per line; lines starting with
+# '#' are ignored, blank lines are ignored.
+#
+# Add your own username and OS-specific temp/home paths here so leaks from
+# your machine are caught. Generic system paths (e.g. /tmp/, /var/, /opt/)
+# are intentionally NOT listed because they appear in legitimate examples.
+/Users/
+/home/
+/root/
+/private/
+/var/folders/
+djtodorovic
+MacBook
