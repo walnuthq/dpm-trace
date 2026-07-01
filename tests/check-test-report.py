@@ -20,6 +20,7 @@ def main() -> int:
     sys.path.insert(0, str(repo_root / "src"))
     from dpm_trace.cli import (  # noqa: E402
         SourceIndex,
+        _eval_replay,
         parse_junit,
         register_component_in_manifest,
         strip_canton_error_decoration,
@@ -106,10 +107,21 @@ def main() -> int:
     finally:
         manifest.unlink(missing_ok=True)
     check("    dpm-trace:" in text, "install-plugin did not register dpm-trace in the manifest")
-    check(
-        "dpm-trace:" in text and text.index("dpm-trace:") < text.index("  assistant:"),
-        "install-plugin placed dpm-trace under assistant: instead of components:",
-    )
+    check("dpm-trace:" in text and text.index("dpm-trace:") < text.index("  assistant:"),
+          "install-plugin placed dpm-trace under assistant: instead of components:")
+
+    # 6. Source-linked replay confidence flag: the PoC evaluator must mark
+    #    un-reducable expressions (e.g. `*`, `if`) as not evaluated rather than
+    #    silently returning None, so the visualizer does not present a missing
+    #    result as a faithful replay.
+    plus = _eval_replay("2 + 3", {})
+    check(plus == (5, True, None), f"2+3 should evaluate: {plus}")
+    star = _eval_replay("a * b", {"a": 2, "b": 3})
+    check(star[0] is None and star[1] is False, f"`*` should be flagged not evaluated: {star}")
+    lookup = _eval_replay("owner", {"owner": "Alice"})
+    check(lookup == ("Alice", True, None), f"env lookup should evaluate: {lookup}")
+    empty = _eval_replay("   ", {})
+    check(empty[1] is True, f"empty expression should not be flagged unsupported: {empty}")
 
     if errors:
         print("dpm trace test parser/mapping checks FAILED:")

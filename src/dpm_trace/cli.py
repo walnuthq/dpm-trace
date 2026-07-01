@@ -90,6 +90,12 @@ class ExpressionStep:
     variables: dict[str, Any] = field(default_factory=dict)
     result: Any = None
     note: str | None = None
+    # Confidence flag for the PoC source-linked replay. False marks a step the
+    # best-effort evaluator could not reduce (e.g. `*`, `if`, `case`, record
+    # projection); the visualizer renders such steps as "not evaluated" instead
+    # of silently skipping the result, so output is not mistaken for a faithful
+    # replay. Steps whose `result` comes from the real transaction are True.
+    evaluated: bool = True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3721,7 +3727,7 @@ def expression_steps_for_event(
             expression=ev.choice or event_target(ev),
             variables=env.copy(),
             result=None,
-            note="source-linked replay step",
+            note="source-linked replay (best-effort: supports env lookup, int/string literals, +, -)",
         )
     ]
 
@@ -3731,8 +3737,8 @@ def expression_steps_for_event(
             continue
         if stripped.startswith("controller "):
             expr = stripped.removeprefix("controller ").strip()
-            result = eval_daml_expression(expr, env)
-            steps.append(ExpressionStep(line, "authorize controller", expr, env.copy(), result))
+            result, evaluated, note = _eval_replay(expr, env)
+            steps.append(ExpressionStep(line, "authorize controller", expr, env.copy(), result, note, evaluated))
             continue
         if stripped == "do":
             steps.append(ExpressionStep(line, "enter do block", stripped, env.copy(), None))
@@ -3744,7 +3750,7 @@ def expression_steps_for_event(
                 steps.append(ExpressionStep(line, "create", stripped, env.copy(), output_payload))
                 continue
             for field, expr in assignments:
-                result = eval_daml_expression(expr, env)
+                result, evaluated, note = _eval_replay(expr, env)
                 steps.append(
                     ExpressionStep(
                         line=line,
@@ -3752,9 +3758,12 @@ def expression_steps_for_event(
                         expression=expr,
                         variables=env.copy(),
                         result=result,
+                        note=note,
+                        evaluated=evaluated,
                     )
                 )
-                env[field] = result
+                if evaluated and result is not None:
+                    env[field] = result
             steps.append(
                 ExpressionStep(
                     line=line,
@@ -3770,14 +3779,29 @@ def expression_steps_for_event(
             continue
         if "<-" in stripped:
             name, expr = [part.strip() for part in stripped.split("<-", 1)]
-            result = eval_daml_expression(expr, env)
-            steps.append(ExpressionStep(line, f"bind {name}", expr, env.copy(), result))
-            if result is not None:
+            result, evaluated, note = _eval_replay(expr, env)
+            steps.append(ExpressionStep(line, f"bind {name}", expr, env.copy(), result, note, evaluated))
+            if evaluated and result is not None:
                 env[name] = result
             continue
-        steps.append(ExpressionStep(line, "evaluate", stripped, env.copy(), eval_daml_expression(stripped, env)))
+        result, evaluated, note = _eval_replay(stripped, env)
+        steps.append(ExpressionStep(line, "evaluate", stripped, env.copy(), result, note, evaluated))
 
     return steps
+
+
+def _eval_replay(expr: str, env: dict[str, Any]) -> tuple[Any, bool, str | None]:
+    """Evaluate `expr` with the best-effort replay evaluator.
+
+    Returns `(result, evaluated, note)`. `evaluated` is False when the
+    expression is non-empty but the PoC evaluator could not reduce it (so the
+    caller can label the step "not evaluated" instead of presenting a missing
+    result as a faithful replay outcome).
+    """
+    result = eval_daml_expression(expr, env)
+    if result is None and expr.strip():
+        return None, False, "unsupported expression; not evaluated (replay supports lookup/int/string/+/-)"
+    return result, True, None
 
 
 def parse_record_update_assignments(value: str) -> list[tuple[str, str]]:
@@ -3950,6 +3974,7 @@ class Stepper:
                 print(json.dumps(event_to_json(event), indent=2, sort_keys=True))
             elif cmd == "help":
                 print("n/next, p/prev, j <index>, s/source, vars, b <spec>, bp, clear [n], c/continue, tree, context, json, q")
+                print("  source-linked replay is best-effort: unsupported expressions are shown as (not evaluated)")
             else:
                 print("unknown command; try `help`")
 
@@ -4061,7 +4086,9 @@ class Stepper:
             print(f"   {self.color.apply('source:', 'cyan')} {step.line.text.strip()}")
             if step.expression:
                 print(f"   {self.color.apply('expr:', 'cyan')}   {step.expression}")
-            if step.result is not None:
+            if not step.evaluated:
+                print(f"   {self.color.apply('result:', 'yellow')} {self.color.apply('(not evaluated)', 'yellow')}")
+            elif step.result is not None:
                 print(f"   {self.color.apply('result:', 'green')} {render_pretty_value(step.result, RenderContext(self.trace))}")
             if step.note:
                 print(f"   {self.color.apply('note:', 'gray')}   {step.note}")
@@ -4102,7 +4129,9 @@ class Stepper:
                 print(color.apply("vars:", "cyan"))
                 for key, value in compact_vars.items():
                     print(f"  {color.apply(key + ':', 'cyan')} {render_pretty_value(value, ctx)}")
-        if step.result is not None:
+        if not step.evaluated:
+            print(f"{color.apply('result:', 'yellow')} {color.apply('(not evaluated)', 'yellow')}")
+        elif step.result is not None:
             print(f"{color.apply('result:', 'green')} {render_pretty_value(step.result, ctx)}")
         if step.note:
             print(f"{color.apply('note:', 'gray')}   {step.note}")
