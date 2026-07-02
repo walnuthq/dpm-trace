@@ -13,6 +13,7 @@ import tempfile
 import textwrap
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -2625,6 +2626,10 @@ def prepare_user_id(args: argparse.Namespace) -> str | None:
     if getattr(args, "user_id", None):
         return args.user_id
     if not getattr(args, "token", None) and not getattr(args, "token_file", None):
+        ledger_url = getattr(args, "ledger_url", None) or ""
+        host = urllib.parse.urlsplit(ledger_url).hostname or ""
+        if host and host not in ("localhost", "127.0.0.1", "::1"):
+            print(f"warning: using default user ID with non-local participant {host!r}; pass --user-id or --token.", file=sys.stderr)
         return "participant_admin"
     return None
 
