@@ -392,4 +392,49 @@ lit tests/real-canton-failed-completion.test
 
 - Output is participant-scoped. It is not a global Canton transaction.
 - Failed submissions may not have an update id. In that case comparison uses completion/error data.
-- Source diagnostics use `damlc inspect` plus local source/project metadata when available, with local source matching as a fallback. Compiler debug-info generation is out of scope for this PoC.
+- Source diagnostics use `damlc inspect` plus local source/project metadata when available, with local source matching as a fallback.
+
+## Using compiler debug info (daml-debug-info/v1)
+
+`damlc build --experimental-debug-info` emits a `daml-debug-info/v1` JSON
+artifact as a sidecar next to the DAR (`<name>.debug-info.json`) and embedded
+in the DAR itself (`META-INF/daml-debug-info/<package-id>.json`). dpm-trace
+consumes both:
+
+- pass the artifact explicitly with `--debug-info <file>` (repeatable), or
+- pass `--dar <file>`: sidecar files next to the DAR and embedded
+  `META-INF/daml-debug-info*.json` members are discovered automatically.
+
+Debug info maps templates, choices, and script steps to exact source spans, so
+`dpm trace --visualize`, failed-completion diagnostics, and `dpm trace debug`
+show real `file:line` references without heuristic text matching. Value
+availability is honest: values backed by the transaction (create arguments,
+choice arguments/results) are labeled `[transaction-visible]`, while values
+that only existed inside the interpreter (controllers, intermediate bindings)
+are labeled `[interpreter-only]` and are never invented.
+
+Legacy schema-less (v0) debug-info files keep working, unknown fields are
+ignored, and newer major schema versions (e.g. `daml-debug-info/v2`) are
+skipped (with a note on stderr when `DPM_TRACE_VERBOSE=1`).
+
+### dpm trace debug
+
+`dpm trace debug` (also registered as `dpm debug`) steps through a Daml Script
+run at source level:
+
+```bash
+# Inspect a recorded runtime debug trace (JSONL, one event per line):
+dpm trace debug run.debug-trace.jsonl --debug-info <name>.debug-info.json
+
+# Or run a script through an instrumented Daml Script runner first:
+dpm trace debug --script Asset:test_transfer --dar <path-to-dar> \
+  --runner <path-to-script-runner>
+
+# Step interactively (n/p/j, list, source, vars, breakpoints, tree):
+dpm trace debug run.debug-trace.jsonl --debug-info <name>.debug-info.json --interactive
+```
+
+The runner command prefix can also come from `DPM_TRACE_SCRIPT_RUNNER` or the
+`scriptRunner` key in `.dpm-trace.json`. The command exits non-zero when the
+trace ends with `script-end status=error` and prints the failing source
+snippet when debug info locates it.

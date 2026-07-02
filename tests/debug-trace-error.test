@@ -1,0 +1,13 @@
+# Daml-independent: a runtime debug trace ending in script-end status=error
+# must exit non-zero and render the error with a source snippet. The fixture
+# also contains one non-JSON line, which is tolerated (warning on stderr).
+# RUN: env PYTHONPATH=%root/src not %python -m dpm_trace.cli debug %root/tests/fixtures/debug-info-v1/run-error.debug-trace.jsonl --debug-info %root/tests/fixtures/debug-info-v1/asset.debug-info.json --color never | FileCheck %s
+
+# CHECK: Daml Script debug trace
+# CHECK: created Asset:Asset
+# CHECK: warning "submission is about to fail"
+# CHECK: script-end error
+# CHECK: status: error: Attempt to exercise a consumed contract
+# CHECK: Asset.daml:33:5
+# CHECK: > 33 |     exerciseCmd asset Transfer with newOwner = bob
+# CHECK-NEXT: ^

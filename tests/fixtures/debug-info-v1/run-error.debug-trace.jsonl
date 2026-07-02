@@ -1,0 +1,6 @@
+{"event":"script-start","script":"Asset:test_transfer"}
+{"event":"submission","actAs":["Alice::1220ab"],"readAs":[],"location":{"packageId":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","module":"Asset","definition":"test_transfer","startLine":29,"startCol":3,"endLine":30,"endCol":68}}
+{"event":"created","templateId":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef:Asset:Asset","contractId":"00aa000000000000000000000000000000000000000000000000000000000001","argument":{"record":{"fields":[{"label":"issuer","value":{"party":"Alice::1220ab"}},{"label":"owner","value":{"party":"Alice::1220ab"}},{"label":"label","value":{"text":"Gem"}}]}}}
+{"event":"warning","message":"submission is about to fail","location":{"packageId":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","module":"Asset","definition":"test_transfer","startLine":32,"startCol":3,"endLine":33,"endCol":51}}
+this line is not JSON and must be tolerated with a warning
+{"event":"script-end","status":"error","error":"Attempt to exercise a consumed contract","location":{"packageId":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","module":"Asset","definition":"test_transfer","startLine":33,"startCol":5,"endLine":33,"endCol":51}}

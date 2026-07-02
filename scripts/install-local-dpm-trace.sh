@@ -32,6 +32,7 @@ COMPONENT_DIR="$DPM_HOME/cache/components/dpm-trace/$COMPONENT_VERSION"
 mkdir -p "$COMPONENT_DIR/bin"
 ln -sfn "$ROOT/component.yaml" "$COMPONENT_DIR/component.yaml"
 ln -sfn "$ROOT/bin/dpm-trace" "$COMPONENT_DIR/bin/dpm-trace"
+ln -sfn "$ROOT/bin/dpm-debug" "$COMPONENT_DIR/bin/dpm-debug"
 
 LOCAL_MANIFEST="$DPM_HOME/cache/sdk/open-source/$SDK_VERSION.yaml"
 if grep -q '^    dpm-trace:' "$GLOBAL_MANIFEST"; then

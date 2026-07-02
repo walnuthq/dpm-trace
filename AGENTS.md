@@ -17,6 +17,7 @@ Command surface:
 - `dpm trace submit`: submit-and-wait a command and print the update id (integration-test primitive).
 - `dpm trace compare`: compare prepared transactions, successful transactions, or completion data.
 - `dpm trace test`: run Daml Script unit tests (unit mode) or an lit suite against a managed local Canton (`--integration`).
+- `dpm trace debug` (also `dpm debug` via `bin/dpm-debug`): source-level debugging for Daml Script runs from a JSONL runtime debug trace plus `daml-debug-info/v1` metadata (`--interactive` for the REPL).
 - `dpm trace ... --visualize`: open the interactive CLI visualizer.
 - `dpm-trace install-plugin`: register the pip-installed CLI as a DPM plugin (so `dpm trace` works without a repo clone); mirrors `scripts/install-local-dpm-trace.sh`.
 

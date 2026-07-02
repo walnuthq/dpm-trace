@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+if [[ -L "$SCRIPT" ]]; then
+  TARGET="$(readlink "$SCRIPT")"
+  if [[ "$TARGET" = /* ]]; then
+    SCRIPT="$TARGET"
+  else
+    SCRIPT="$(cd "$(dirname "$SCRIPT")/$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")"
+  fi
+fi
+
+ROOT="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PYTHON="$ROOT/.venv/bin/python"
+else
+  PYTHON="${PYTHON:-python3}"
+fi
+
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" -m dpm_trace.cli debug "$@"

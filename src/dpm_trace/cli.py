@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -15,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,12 +106,37 @@ class ExpressionStep:
     evaluated: bool = True
 
 
+@dataclass
+class DebugStep:
+    """One normalized event from a Daml Script runtime debug trace (JSONL)."""
+
+    index: int
+    kind: str
+    title: str
+    location: SourceLocation | None = None
+    # Simplified values observed for this step (create arguments, choice
+    # arguments/results). Values that only existed inside the interpreter are
+    # never invented; `availability` labels each value name as
+    # "transaction-visible" or "interpreter-only" when debug info declares it.
+    values: dict[str, Any] = field(default_factory=dict)
+    availability: dict[str, str] = field(default_factory=dict)
+    target: str | None = None
+    contract_id: str | None = None
+    status: str | None = None
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # The DPM plugin invokes us without the "trace" command name; accept an
     # explicit leading "trace" too so `dpm_trace.cli trace <id>` works directly.
     if argv and argv[0] == "trace":
         argv = argv[1:]
+    # Handled after the leading-"trace" strip so both `dpm trace debug ...`
+    # and a top-level `dpm debug` (via bin/dpm-debug) reach the same entry.
+    if argv and argv[0] == "debug":
+        return debug_main(argv[1:])
     if argv and argv[0] == "open":
         return open_main(argv[1:])
     if argv and argv[0] == "prepare":
@@ -199,6 +227,361 @@ def open_main(argv: list[str]) -> int:
     parser.add_argument("--debug-info", action="append", default=[], help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     return run_open(args)
+
+
+def debug_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm debug",
+        description=(
+            "Source-level debugging for Daml Script runs. Consumes a JSONL runtime "
+            "debug trace (from an instrumented Daml Script runner) plus "
+            "daml-debug-info/v1 metadata for real file:line references."
+        ),
+        epilog=(
+            "Examples: "
+            "dpm debug run.debug-trace.jsonl --debug-info asset.debug-info.json; "
+            "dpm debug --script Asset:test_transfer --dar <path-to-dar> --runner <script-runner>."
+        ),
+    )
+    parser.add_argument("trace_file", nargs="?", help="Path to a JSONL runtime debug trace. Omit to run a script via --runner.")
+    parser.add_argument("--script", help="Script to run, as Module:name (run mode).")
+    parser.add_argument("--dar", action="append", default=[], help="DAR to run against and auto-discover debug info from (sidecar or embedded META-INF member). Repeatable.")
+    parser.add_argument("--runner", help="Instrumented Daml Script runner command prefix (or DPM_TRACE_SCRIPT_RUNNER / config scriptRunner).")
+    parser.add_argument("--debug-info", action="append", default=[], help="daml-debug-info JSON artifact. Repeatable.")
+    parser.add_argument("--daml-yaml", action="append", default=[], help="Path to daml.yaml for local source lookup. Repeatable.")
+    parser.add_argument("--source-root", action="append", default=[], help="Local Daml source root. Repeatable.")
+    parser.add_argument("--damlc", help="Daml assistant or damlc executable for package inspection. Defaults to daml.")
+    parser.add_argument("--color", choices=["auto", "always", "never"], default="auto", help="Colorize output. Defaults to auto.")
+    parser.add_argument("--interactive", action="store_true", help="Open the interactive debug stepper.")
+    parser.add_argument("--json", action="store_true", help="Print normalized debug events as JSON and exit.")
+    parser.add_argument(
+        "--config",
+        help="Trace config JSON. Defaults to .dpm-trace.json found in the current directory or a parent.",
+    )
+    args = parser.parse_args(argv)
+    return run_debug(args)
+
+
+def run_debug(args: argparse.Namespace) -> int:
+    try:
+        config = load_config(args.config)
+        apply_config_defaults(args, config)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    set_default(args, "runner", os.environ.get("DPM_TRACE_SCRIPT_RUNNER") or get_config(config, "scriptRunner", "script_runner"))
+    color = Color.from_mode(args.color)
+    source_index = source_index_from_args(args)
+
+    temp_trace: Path | None = None
+    if args.trace_file:
+        trace_path = Path(args.trace_file).expanduser()
+    else:
+        if not args.script:
+            print("error: provide a JSONL trace file, or --script Module:name to run one", file=sys.stderr)
+            return 2
+        if not args.runner:
+            print(
+                "error: no script runner configured; pass --runner, set DPM_TRACE_SCRIPT_RUNNER, "
+                "or set scriptRunner in .dpm-trace.json",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.dar:
+            print("error: run mode requires --dar <path-to-dar>", file=sys.stderr)
+            return 2
+        fd, tmp_name = tempfile.mkstemp(prefix="dpm-debug-", suffix=".jsonl")
+        os.close(fd)
+        temp_trace = Path(tmp_name)
+        command = shlex.split(args.runner)
+        for dar in args.dar:
+            command += ["--dar", dar]
+        command += ["--script-name", args.script, "--ide-ledger", "--debug-trace-file", str(temp_trace)]
+        try:
+            completed = subprocess.run(command, check=False, cwd=".", env=daml_child_env())
+        except OSError as exc:
+            temp_trace.unlink(missing_ok=True)
+            print(f"error: failed to start script runner {command[0]}: {exc}", file=sys.stderr)
+            return 2
+        if completed.returncode != 0:
+            print(f"warning: script runner exited with code {completed.returncode}", file=sys.stderr)
+        trace_path = temp_trace
+
+    try:
+        events, junk_lines = load_debug_trace_events(trace_path)
+    except OSError as exc:
+        print(f"error: cannot read debug trace: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if temp_trace is not None:
+            temp_trace.unlink(missing_ok=True)
+    if junk_lines:
+        print(f"warning: skipped {junk_lines} unparseable line(s) in {trace_path}", file=sys.stderr)
+
+    steps = normalize_debug_steps(events, source_index)
+    failed = debug_trace_failed(steps)
+    if args.json:
+        print(json.dumps([debug_step_json(step) for step in steps], indent=2, sort_keys=True))
+        return 1 if failed else 0
+    if args.interactive:
+        DebugStepper(steps, source_index=source_index, color=color).run()
+        return 1 if failed else 0
+    print_debug_trace(steps, source_index, color)
+    return 1 if failed else 0
+
+
+def load_debug_trace_events(path: Path) -> tuple[list[dict[str, Any]], int]:
+    """Load a JSONL runtime debug trace.
+
+    Blank lines are skipped; lines that are not valid JSON objects are
+    tolerated and counted (returned as the second tuple element) so a
+    truncated or noisy trace still renders.
+    """
+    events: list[dict[str, Any]] = []
+    junk = 0
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            junk += 1
+            continue
+        if isinstance(data, dict):
+            events.append(data)
+        else:
+            junk += 1
+    return events, junk
+
+
+DEBUG_EVENT_KINDS = (
+    "script-start",
+    "trace",
+    "warning",
+    "question",
+    "submission",
+    "created",
+    "exercised",
+    "script-end",
+)
+
+
+def debug_location(loc: Any, source_index: SourceIndex) -> SourceLocation | None:
+    """Map a runtime-trace LOC dict onto a SourceLocation (1-based)."""
+    if not isinstance(loc, dict):
+        return None
+    line = loc.get("startLine")
+    if not isinstance(line, int):
+        return None
+    module = loc.get("module") if isinstance(loc.get("module"), str) else None
+    paths = source_index.module_files.get(module, []) if module else []
+    if paths:
+        path = paths[0]
+    elif module:
+        # Unknown module: keep a readable pseudo-path so the reference still
+        # names the module even when no source file is indexed.
+        path = f"{module}.daml"
+    else:
+        path = "<unknown>"
+    definition = loc.get("definition")
+    if module and definition:
+        label = f"{module}:{definition}"
+    else:
+        label = module or str(definition or "")
+    column = loc.get("startCol") if isinstance(loc.get("startCol"), int) else 1
+    end_line = loc.get("endLine") if isinstance(loc.get("endLine"), int) else None
+    end_column = loc.get("endCol") if isinstance(loc.get("endCol"), int) else None
+    return SourceLocation(path, line, label, column, end_line, end_column)
+
+
+def normalize_debug_steps(events: list[dict[str, Any]], source_index: SourceIndex) -> list[DebugStep]:
+    steps: list[DebugStep] = []
+    for raw in events:
+        kind = raw.get("event")
+        if not isinstance(kind, str) or kind not in DEBUG_EVENT_KINDS:
+            continue  # forward compat: unknown event kinds are ignored
+        location = debug_location(raw.get("location"), source_index)
+        title = kind
+        values: dict[str, Any] = {}
+        availability: dict[str, str] = {}
+        target: str | None = None
+        contract_id = raw.get("contractId") if isinstance(raw.get("contractId"), str) else None
+        status: str | None = None
+        error: str | None = None
+
+        if kind == "script-start":
+            script = raw.get("script")
+            title = f"script-start {script}" if script else kind
+        elif kind in ("trace", "warning"):
+            message = raw.get("message")
+            if isinstance(message, str) and len(message) >= 2 and message[0] == '"' and message[-1] == '"':
+                # Daml's debug/trace output already shows text values quoted.
+                message = message[1:-1]
+            title = f'{kind} "{message}"' if message is not None else kind
+        elif kind == "question":
+            name = raw.get("name")
+            title = f"question {name}" if name else kind
+            if location is None:
+                stack = raw.get("stackTrace")
+                if isinstance(stack, list) and stack:
+                    location = debug_location(stack[0], source_index)
+        elif kind == "submission":
+            act_as = [str(party) for party in raw.get("actAs") or []]
+            title = f"submission actAs={', '.join(act_as)}" if act_as else kind
+        elif kind in ("created", "exercised"):
+            template_id = raw.get("templateId") if isinstance(raw.get("templateId"), str) else None
+            parsed = parse_template_ref(template_id)
+            argument = simplify_lf_value(raw.get("argument")) if raw.get("argument") is not None else None
+            if isinstance(argument, dict):
+                values.update(argument)
+            elif argument is not None:
+                values["argument"] = argument
+            if kind == "exercised" and raw.get("result") is not None:
+                values["result"] = simplify_lf_value(raw.get("result"))
+            slot_key = None
+            if parsed is not None:
+                package_id, module, entity = parsed
+                target = f"{module}:{entity}"
+                if kind == "created":
+                    title = f"created {target}"
+                    slot_key = f"{package_id}:{module}:{entity}"
+                    if location is None:
+                        location = source_index.templates.get(slot_key)
+                else:
+                    choice = raw.get("choice") if isinstance(raw.get("choice"), str) else None
+                    if choice:
+                        target = f"{module}:{entity}.{choice}"
+                        title = f"exercised {module}:{entity} {choice}"
+                        slot_key = f"{package_id}:{module}:{entity}.{choice}"
+                        if location is None:
+                            location = source_index.choices.get(slot_key)
+                    else:
+                        title = f"exercised {module}:{entity}"
+                        slot_key = f"{package_id}:{module}:{entity}"
+            declared = {
+                slot.get("name"): slot.get("availability")
+                for slot in source_index.slot_availability.get(slot_key, [])
+            } if slot_key else {}
+            for name in values:
+                availability[name] = str(declared.get(name) or "transaction-visible")
+        elif kind == "script-end":
+            status = raw.get("status") if isinstance(raw.get("status"), str) else None
+            error = raw.get("error") if isinstance(raw.get("error"), str) else None
+            title = f"script-end {status}" if status else kind
+
+        steps.append(
+            DebugStep(
+                index=len(steps),
+                kind=kind,
+                title=title,
+                location=location,
+                values=values,
+                availability=availability,
+                target=target,
+                contract_id=contract_id,
+                status=status,
+                error=error,
+                raw=raw,
+            )
+        )
+    return steps
+
+
+def debug_trace_failed(steps: list[DebugStep]) -> bool:
+    end = next((step for step in reversed(steps) if step.kind == "script-end"), None)
+    return end is not None and end.status == "error"
+
+
+def debug_step_json(step: DebugStep) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "index": step.index,
+        "kind": step.kind,
+        "title": step.title,
+    }
+    if step.location is not None:
+        data["location"] = {
+            "path": step.location.path,
+            "line": step.location.line,
+            "column": step.location.column,
+            "endLine": step.location.end_line,
+            "endColumn": step.location.end_column,
+            "label": step.location.label,
+        }
+    if step.values:
+        data["values"] = step.values
+    if step.availability:
+        data["availability"] = step.availability
+    if step.target:
+        data["target"] = step.target
+    if step.contract_id:
+        data["contractId"] = step.contract_id
+    if step.status:
+        data["status"] = step.status
+    if step.error:
+        data["error"] = step.error
+    return data
+
+
+def debug_source_ref(loc: SourceLocation) -> str:
+    return f"{loc.path}:{loc.line}"
+
+
+def debug_with_line(step: DebugStep) -> str | None:
+    fields = {key: value for key, value in step.values.items() if key != "result"}
+    if not fields:
+        return None
+    return "with " + ", ".join(f"{key} = {compact_value(value)}" for key, value in fields.items())
+
+
+def print_debug_trace(steps: list[DebugStep], source_index: SourceIndex, color: Color) -> None:
+    print(color.apply("Daml Script debug trace", "bold"))
+    script = next(
+        (step.title.removeprefix("script-start").strip() for step in steps if step.kind == "script-start"),
+        None,
+    )
+    if script:
+        print(f"  script: {script}")
+    print(f"  events: {len(steps)}")
+    print()
+    if not steps:
+        print(color.apply("No debug events found.", "yellow"))
+        return
+    width = min(max(len(step.title) for step in steps), 56)
+    for step in steps:
+        title = step.title.ljust(width)
+        line = f"{step.index + 1:>3}  {color.apply(title, event_color(debug_event_kind_alias(step.kind)))}"
+        if step.location is not None:
+            line += "  " + color.apply(debug_source_ref(step.location), "cyan")
+        print(line.rstrip())
+        if step.kind in ("created", "exercised"):
+            with_line = debug_with_line(step)
+            if with_line:
+                print(f"       {with_line}")
+            if "result" in step.values:
+                print(f"       result = {compact_value(step.values['result'])}")
+    print()
+    end = next((step for step in reversed(steps) if step.kind == "script-end"), None)
+    if end is None:
+        print(color.apply("status: unknown (trace has no script-end event)", "yellow"))
+        return
+    if end.status == "error":
+        message = "status: error"
+        if end.error:
+            message += f": {end.error}"
+        print(color.apply(message, "red", "bold"))
+        if end.location is not None:
+            print()
+            print(source_index.snippet(end.location))
+    else:
+        print(color.apply(f"status: {end.status or 'unknown'}", "green", "bold"))
+
+
+def debug_event_kind_alias(kind: str) -> str:
+    return {
+        "created": "create",
+        "exercised": "exercise",
+    }.get(kind, kind)
 
 
 def prepare_main(argv: list[str]) -> int:
@@ -343,6 +726,9 @@ def run_install_plugin(args: argparse.Namespace) -> int:
     # with the same Python interpreter that ran `install-plugin`.
     wrapper.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" -m dpm_trace.cli "$@"\n', encoding="utf-8")
     wrapper.chmod(0o755)
+    debug_wrapper = component_dir / "bin" / "dpm-debug"
+    debug_wrapper.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" -m dpm_trace.cli debug "$@"\n', encoding="utf-8")
+    debug_wrapper.chmod(0o755)
 
     register_component_in_manifest(manifest, "dpm-trace", component_version)
 
@@ -360,6 +746,9 @@ def component_yaml_text() -> str:
         "    - name: trace\n"
         "      path: bin/dpm-trace\n"
         "      desc: Visualize and compare Canton transactions\n"
+        "    - name: debug\n"
+        "      path: bin/dpm-debug\n"
+        "      desc: Source-level debugging for Daml Script runs\n"
     )
 
 
@@ -3480,14 +3869,50 @@ class SourceIndex:
         self.file_modules: dict[str, str] = {}
         self.module_files: dict[str, list[str]] = {}
         self.inspect_modules: dict[str, list[str]] = {}
-        for path in debug_info_paths or []:
-            self._load_debug_info(Path(path).expanduser())
+        # daml-debug-info/v1 extras, keyed by f"{package_id}:{qualifiedName}".
+        self.debug_symbols: dict[str, dict[str, Any]] = {}
+        self.slot_availability: dict[str, list[dict[str, Any]]] = {}
+        self.debug_steps: dict[str, list[SourceLocation]] = {}
+        # Source roots load first so that debug-info source resolution can use
+        # them as candidate bases for package-relative paths.
         for path in daml_yaml_paths or []:
             self._load_daml_yaml(Path(path).expanduser())
         for path in source_roots or []:
             self._load_source_root(Path(path).expanduser())
+        for path in debug_info_paths or []:
+            self._load_debug_info(Path(path).expanduser())
         for path in dar_paths or []:
-            self._load_dar_inspect(Path(path).expanduser(), damlc or "daml")
+            dar = Path(path).expanduser()
+            self._load_dar_debug_info(dar)
+            self._load_dar_inspect(dar, damlc or "daml")
+
+    def _load_dar_debug_info(self, dar: Path) -> None:
+        """Auto-discover daml-debug-info emitted alongside or inside a DAR.
+
+        `damlc build --experimental-debug-info` writes a sidecar
+        `<name>.debug-info.json` next to the DAR and embeds the same artifact
+        as `META-INF/daml-debug-info/<package-id>.json` (older prototypes used
+        `META-INF/daml-debug-info.json`) inside the DAR zip.
+        """
+        sidecars = [dar.with_suffix(".debug-info.json"), Path(str(dar) + ".debug-info.json")]
+        for sidecar in sidecars:
+            if sidecar.is_file():
+                self._load_debug_info(sidecar)
+        try:
+            with zipfile.ZipFile(dar) as archive:
+                for name in archive.namelist():
+                    if not (name.startswith("META-INF/daml-debug-info") and name.endswith(".json")):
+                        continue
+                    try:
+                        data = json.loads(archive.read(name).decode("utf-8"))
+                    except (OSError, KeyError, UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(data, dict):
+                        # Resolve package-relative sources against the DAR's
+                        # parent directory and its ancestors.
+                        self._load_debug_info_data(dar, data)
+        except (zipfile.BadZipFile, OSError):
+            return
 
     def _load_debug_info(self, path: Path) -> None:
         try:
@@ -3496,6 +3921,183 @@ class SourceIndex:
             return
         if not isinstance(data, dict):
             return
+        self._load_debug_info_data(path, data)
+
+    def _load_debug_info_data(self, path: Path, data: dict[str, Any]) -> None:
+        schema = data.get("schema")
+        if isinstance(schema, str) and schema:
+            major = schema.split("/", 1)[1] if schema.startswith("daml-debug-info/") else ""
+            major = major.split(".", 1)[0]
+            if major == "v1":
+                self._load_debug_info_v1(path, data)
+            elif os.environ.get("DPM_TRACE_VERBOSE"):
+                print(
+                    f"dpm trace: skipping unsupported debug-info schema {schema!r} from {path}",
+                    file=sys.stderr,
+                )
+            return
+        self._load_debug_info_v0(path, data)
+
+    def _load_debug_info_v1(self, path: Path, data: dict[str, Any]) -> None:
+        package = data.get("package")
+        if not isinstance(package, dict):
+            return
+        package_id = package.get("packageId")
+        if not isinstance(package_id, str) or not package_id:
+            return
+        verbose = bool(os.environ.get("DPM_TRACE_VERBOSE"))
+
+        # Candidate bases for package-relative source paths: the debug-info
+        # file's parent and two levels above it (covers sidecars living in
+        # `.daml/dist/` next to the DAR), each also with the conventional
+        # `daml/` source dir, plus any already-known roots.
+        bases: list[Path] = []
+        for parent in (path.parent, path.parent.parent, path.parent.parent.parent):
+            for base in (parent, parent / "daml"):
+                if base not in bases:
+                    bases.append(base)
+        for root in self.roots:
+            root_path = Path(root)
+            if root_path not in bases:
+                bases.append(root_path)
+
+        source_paths: dict[str, str] = {}
+        for source in data.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            source_id = source.get("id")
+            rel_path = source.get("path")
+            if not isinstance(source_id, str) or not isinstance(rel_path, str) or not rel_path:
+                continue
+            module = source.get("module") if isinstance(source.get("module"), str) else None
+            resolved: Path | None = None
+            for base in bases:
+                candidate = base / rel_path
+                if candidate.is_file():
+                    resolved = candidate
+                    break
+            if resolved is None:
+                # Keep the package-relative path; snippet rendering degrades
+                # gracefully to a plain path:line reference.
+                source_paths[source_id] = rel_path
+                continue
+            declared_hash = source.get("sha256")
+            if verbose and isinstance(declared_hash, str) and declared_hash:
+                try:
+                    actual_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                except OSError:
+                    actual_hash = None
+                if actual_hash is not None and actual_hash.lower() != declared_hash.lower():
+                    print(
+                        f"dpm trace: debug-info source {rel_path} does not match its recorded "
+                        f"sha256 (stale build?); using {resolved} anyway",
+                        file=sys.stderr,
+                    )
+            resolved_str = str(resolved)
+            source_paths[source_id] = resolved_str
+            try:
+                self.files[resolved_str] = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            if module:
+                self.file_modules[resolved_str] = module
+                self.module_files.setdefault(module, [])
+                if resolved_str not in self.module_files[module]:
+                    self.module_files[module].append(resolved_str)
+
+        spans: dict[str, dict[str, Any]] = {}
+        for span in data.get("spans") or []:
+            if isinstance(span, dict) and isinstance(span.get("id"), str):
+                spans[span["id"]] = span
+
+        def position(value: Any, key: str) -> int | None:
+            if isinstance(value, dict) and isinstance(value.get(key), int):
+                return value[key]
+            return None
+
+        def span_location(span_id: Any, label: str) -> SourceLocation | None:
+            span = spans.get(span_id) if isinstance(span_id, str) else None
+            if span is None:
+                return None
+            start_line = position(span.get("start"), "line")
+            if start_line is None:
+                return None
+            source_id = span.get("source")
+            span_path = source_paths.get(source_id) if isinstance(source_id, str) else None
+            if not span_path:
+                span_path = str(source_id or "<unknown>")
+            return SourceLocation(
+                span_path,
+                start_line,
+                label,
+                position(span.get("start"), "column") or 1,
+                position(span.get("end"), "line"),
+                position(span.get("end"), "column"),
+            )
+
+        symbol_keys: dict[str, str] = {}
+        for symbol in data.get("symbols") or []:
+            if not isinstance(symbol, dict):
+                continue
+            kind = symbol.get("kind")
+            qualified = symbol.get("qualifiedName")
+            if not isinstance(kind, str) or not isinstance(qualified, str) or not qualified:
+                continue
+            key = f"{package_id}:{qualified}"
+            symbol_id = symbol.get("id")
+            if isinstance(symbol_id, str):
+                symbol_keys[symbol_id] = key
+            loc = span_location(symbol.get("span"), qualified)
+            if loc is not None:
+                if kind in ("template", "interface"):
+                    self.templates[key] = loc
+                elif kind in ("choice", "interface-choice"):
+                    # v1 qualifiedName already uses the Module:Entity.Choice
+                    # shape that location_for_event builds.
+                    self.choices[key] = loc
+            # Symbols without a span still count for availability metadata.
+            self.debug_symbols[key] = {"kind": kind, "id": symbol_id, "span": loc}
+
+        for slot in data.get("valueSlots") or []:
+            if not isinstance(slot, dict):
+                continue
+            owner = symbol_keys.get(slot.get("symbol")) if isinstance(slot.get("symbol"), str) else None
+            if owner is None:
+                continue
+            self.slot_availability.setdefault(owner, []).append(
+                {
+                    "name": slot.get("name"),
+                    "kind": slot.get("kind"),
+                    "type": slot.get("type"),
+                    "availability": slot.get("availability"),
+                }
+            )
+
+        for step in data.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            owner = symbol_keys.get(step.get("symbol")) if isinstance(step.get("symbol"), str) else None
+            if owner is None:
+                continue
+            start_line = position(step.get("start"), "line")
+            if start_line is None:
+                continue
+            source_id = step.get("source")
+            step_path = source_paths.get(source_id) if isinstance(source_id, str) else None
+            if not step_path:
+                step_path = str(source_id or "<unknown>")
+            self.debug_steps.setdefault(owner, []).append(
+                SourceLocation(
+                    step_path,
+                    start_line,
+                    str(step.get("id") or ""),
+                    position(step.get("start"), "column") or 1,
+                    position(step.get("end"), "line"),
+                    position(step.get("end"), "column"),
+                )
+            )
+
+    def _load_debug_info_v0(self, path: Path, data: dict[str, Any]) -> None:
         package_id = data.get("packageId")
         if not isinstance(package_id, str) or not package_id:
             return
@@ -3750,6 +4352,56 @@ def source_index_from_args(args: argparse.Namespace, bundle: dict[str, Any] | No
         dar_paths=unique([path for path in dar_paths if path]),
         damlc=getattr(args, "damlc", None) or "daml",
     )
+
+
+# The transaction Stepper exposes wrapper variables rather than raw slot
+# names; map them onto the v1 value-slot kinds they summarize so availability
+# labels can annotate them.
+WRAPPER_SLOT_KINDS = {
+    "choiceArgument": ("choice-argument", "choice-argument-field"),
+    "choiceResult": ("choice-result",),
+    "createPayload": ("contract-payload", "contract-payload-field"),
+}
+
+
+def slot_availability_for_event(source_index: SourceIndex, ev: TraceEvent) -> dict[str, str]:
+    """Value-slot availability labels declared by daml-debug-info/v1.
+
+    Returns a name -> "transaction-visible"/"interpreter-only" map for the
+    event's choice (or template for creates). Wrapper variable names used by
+    the Stepper (choiceArgument, choiceResult, createPayload) are aliased to
+    their slot kinds when all matching slots agree on one label. Empty when no
+    debug info is loaded, so the annotation stays invisible without
+    --debug-info/--dar.
+    """
+    if not source_index.slot_availability:
+        return {}
+    parsed = parse_template_ref(ev.template)
+    if parsed is None:
+        return {}
+    package_id, module, entity = parsed
+    keys = []
+    if ev.choice:
+        keys.append(f"{package_id}:{module}:{entity}.{ev.choice}")
+    keys.append(f"{package_id}:{module}:{entity}")
+    slots: list[dict[str, Any]] = []
+    for key in keys:
+        slots.extend(source_index.slot_availability.get(key, []))
+    result: dict[str, str] = {}
+    for slot in slots:
+        name = slot.get("name")
+        availability = slot.get("availability")
+        if isinstance(name, str) and isinstance(availability, str) and name not in result:
+            result[name] = availability
+    for wrapper, kinds in WRAPPER_SLOT_KINDS.items():
+        labels = {
+            slot.get("availability")
+            for slot in slots
+            if slot.get("kind") in kinds and isinstance(slot.get("availability"), str)
+        }
+        if len(labels) == 1 and wrapper not in result:
+            result[wrapper] = labels.pop()
+    return result
 
 
 def parse_template_ref(template: str | None) -> tuple[str, str, str] | None:
@@ -4185,17 +4837,25 @@ class Stepper:
         ev = self.trace.events_by_id[event_id]
         ctx = RenderContext(self.trace)
         variables = self.step_variables(ev, ctx)
+        availability = slot_availability_for_event(self.source_index, ev)
         print(self.color.apply("variables", "bold"))
         if not variables:
             print("  -")
             return
         for key, value in variables.items():
+            suffix = self.availability_suffix(availability, key)
             rendered = render_pretty_value(value, ctx)
             if "\n" in rendered:
-                print(f"  {self.color.apply(key + ':', 'cyan')}")
+                print(f"  {self.color.apply(key + ':', 'cyan')}{suffix}")
                 print(indent_text(rendered))
             else:
-                print(f"  {self.color.apply(key + ':', 'cyan')} {rendered}")
+                print(f"  {self.color.apply(key + ':', 'cyan')} {rendered}{suffix}")
+
+    def availability_suffix(self, availability: dict[str, str], name: str) -> str:
+        label = availability.get(name)
+        if not label:
+            return ""
+        return " " + self.color.apply(f"[{label}]", "gray")
 
     def show_expression_steps(self) -> None:
         steps = self.current_expression_steps()
@@ -4247,9 +4907,12 @@ class Stepper:
                 if key in ("this", "owner", "count", "amount", "choiceArgument")
             }
             if compact_vars:
+                ev = self.trace.events_by_id[self.order[self.index]]
+                availability = slot_availability_for_event(self.source_index, ev)
                 print(color.apply("vars:", "cyan"))
                 for key, value in compact_vars.items():
-                    print(f"  {color.apply(key + ':', 'cyan')} {render_pretty_value(value, ctx)}")
+                    suffix = self.availability_suffix(availability, key)
+                    print(f"  {color.apply(key + ':', 'cyan')} {render_pretty_value(value, ctx)}{suffix}")
         if not step.evaluated:
             print(f"{color.apply('result:', 'yellow')} {color.apply('(not evaluated)', 'yellow')}")
         elif step.result is not None:
@@ -4369,6 +5032,217 @@ class Stepper:
             return
         if idx < 0 or idx >= len(self.order):
             print(f"step must be between 1 and {len(self.order)}")
+            return
+        self.index = idx
+        self.show_current()
+
+
+@dataclass
+class DebugBreakpoint:
+    spec: str
+
+    def matches(self, step: DebugStep) -> bool:
+        spec = self.spec.strip()
+        if not spec:
+            return False
+        lowered = spec.lower()
+        if lowered == step.kind.lower():
+            return True
+        if step.target and (lowered == step.target.lower() or lowered in step.target.lower()):
+            return True
+        if lowered in step.title.lower():
+            return True
+        loc = step.location
+        file_part, sep, line_part = spec.rpartition(":")
+        if sep and line_part.isdigit():
+            if loc is None or int(line_part) != loc.line:
+                return False
+            file_part = file_part.strip()
+            if not file_part:
+                return True
+            return (
+                loc.path.endswith(file_part)
+                or Path(loc.path).stem == file_part
+                or loc.label.split(":")[0] == file_part
+            )
+        if loc is not None and lowered in loc.label.lower():
+            return True
+        return False
+
+
+class DebugStepper:
+    """Interactive REPL over a normalized Daml Script runtime debug trace.
+
+    Deliberately separate from the transaction Stepper: it walks recorded
+    script events (with honest value availability), not a committed
+    transaction tree.
+    """
+
+    def __init__(
+        self,
+        steps: list[DebugStep],
+        source_index: SourceIndex | None = None,
+        color: Color | None = None,
+    ) -> None:
+        self.steps = steps
+        self.source_index = source_index or SourceIndex()
+        self.color = color or Color(False)
+        self.breakpoints: list[DebugBreakpoint] = []
+        self.index = 0
+
+    def run(self) -> None:
+        print(self.color.apply("Daml Script debug session", "bold"))
+        print(
+            self.color.apply("Debugger commands:", "bold")
+            + " n/next, p/prev, j <n>, list, s/source, vars, b <spec>, bp, c/continue, tree, q"
+        )
+        if not self.steps:
+            print("No debug events found.")
+            return
+        self.show_current()
+        while True:
+            try:
+                cmd = input("dpm-debug> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if cmd in ("q", "quit", "exit"):
+                return
+            if cmd in ("", "n", "next"):
+                self.index = min(self.index + 1, len(self.steps) - 1)
+                self.show_current()
+            elif cmd in ("p", "prev"):
+                self.index = max(self.index - 1, 0)
+                self.show_current()
+            elif cmd.startswith("j "):
+                self.jump(cmd)
+            elif cmd in ("l", "list"):
+                self.show_list()
+            elif cmd in ("s", "src", "source"):
+                self.show_source()
+            elif cmd in ("vars", "locals"):
+                self.show_values()
+            elif cmd.startswith("b "):
+                self.add_breakpoint(cmd)
+            elif cmd in ("bp", "breakpoints"):
+                self.list_breakpoints()
+            elif cmd in ("c", "continue"):
+                self.continue_to_breakpoint()
+            elif cmd == "tree":
+                self.show_tree()
+            elif cmd == "help":
+                print("n/next, p/prev, j <index>, list, s/source, vars, b <Module:line | Mod:Tpl.Choice | kind>, bp, c/continue, tree, q")
+                print("  values are shown with honest availability: [transaction-visible] vs [interpreter-only]")
+            else:
+                print("unknown command; try `help`")
+
+    def current(self) -> DebugStep:
+        return self.steps[self.index]
+
+    def show_current(self) -> None:
+        step = self.current()
+        color = self.color
+        print("\n" + color.apply("-" * 72, "gray"))
+        print(
+            color.apply(f"Step {self.index + 1}/{len(self.steps)}", "bold"),
+            color.apply(step.kind.upper(), event_color(debug_event_kind_alias(step.kind)), "bold"),
+        )
+        print(label_value("event", step.title, color))
+        if step.location is not None:
+            print(label_value("source", f"{format_source_path(step.location)}  ({step.location.label})", color))
+        if step.contract_id:
+            print(label_value("contract", short(step.contract_id), color))
+        if step.kind in ("created", "exercised"):
+            with_line = debug_with_line(step)
+            if with_line:
+                print(label_value("values", with_line.removeprefix("with "), color))
+        if step.kind == "script-end" and step.error:
+            print(label_value("error", step.error, color))
+
+    def show_list(self) -> None:
+        width = min(max(len(step.title) for step in self.steps), 56)
+        for step in self.steps:
+            cursor = self.color.apply("=>", "magenta", "bold") if step.index == self.index else "  "
+            line = f"{cursor} {step.index + 1:>3}  {step.title.ljust(width)}"
+            if step.location is not None:
+                line += "  " + self.color.apply(debug_source_ref(step.location), "cyan")
+            print(line.rstrip())
+
+    def show_source(self) -> None:
+        step = self.current()
+        if step.location is None:
+            print(self.color.apply("no source location available for this event; provide --debug-info or --dar metadata", "yellow"))
+            return
+        print(self.source_index.snippet(step.location))
+
+    def show_values(self) -> None:
+        step = self.current()
+        print(self.color.apply("values", "bold"))
+        if not step.values:
+            # trace/question/... events carry no captured values; say so
+            # instead of inventing interpreter-internal state.
+            print("  " + self.color.apply("interpreter-only values are not captured by this trace", "yellow"))
+            return
+        for key, value in step.values.items():
+            availability = step.availability.get(key)
+            suffix = " " + self.color.apply(f"[{availability}]", "gray") if availability else ""
+            rendered = render_pretty_value(value)
+            if "\n" in rendered:
+                print(f"  {self.color.apply(key + ':', 'cyan')}{suffix}")
+                print(indent_text(rendered))
+            else:
+                print(f"  {self.color.apply(key + ':', 'cyan')} {rendered}{suffix}")
+
+    def add_breakpoint(self, cmd: str) -> None:
+        _head, _sep, spec = cmd.partition(" ")
+        spec = spec.strip()
+        if not spec:
+            print(self.color.apply("usage: b <Module:line | Mod:Tpl.Choice | kind>", "yellow"))
+            return
+        self.breakpoints.append(DebugBreakpoint(spec))
+        print(f"{self.color.apply('breakpoint', 'magenta', 'bold')} {len(self.breakpoints)} set: {spec}")
+
+    def list_breakpoints(self) -> None:
+        if not self.breakpoints:
+            print(self.color.apply("no breakpoints", "yellow"))
+            return
+        for index, breakpoint in enumerate(self.breakpoints, start=1):
+            print(f"{self.color.apply(str(index) + ':', 'gray')} {breakpoint.spec}")
+
+    def continue_to_breakpoint(self) -> None:
+        if not self.breakpoints:
+            print(self.color.apply("no breakpoints set", "yellow"))
+            return
+        for idx in range(self.index + 1, len(self.steps)):
+            if any(bp.matches(self.steps[idx]) for bp in self.breakpoints):
+                self.index = idx
+                self.show_current()
+                return
+        print(self.color.apply("no later breakpoint hit", "yellow"))
+
+    def show_tree(self) -> None:
+        printed = False
+        for step in self.steps[: self.index + 1]:
+            if step.kind not in ("created", "exercised"):
+                continue
+            printed = True
+            cursor = self.color.apply("=>", "magenta", "bold") if step.index == self.index else "  "
+            line = f"{cursor} {step.title}"
+            if step.contract_id:
+                line += "  " + self.color.apply(short(step.contract_id), "gray")
+            print(line)
+        if not printed:
+            print(self.color.apply("no contracts created or exercised yet", "yellow"))
+
+    def jump(self, cmd: str) -> None:
+        _, _, value = cmd.partition(" ")
+        try:
+            idx = int(value) - 1
+        except ValueError:
+            print("usage: j <step-number>")
+            return
+        if idx < 0 or idx >= len(self.steps):
+            print(f"step must be between 1 and {len(self.steps)}")
             return
         self.index = idx
         self.show_current()

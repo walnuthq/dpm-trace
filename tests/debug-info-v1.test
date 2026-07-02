@@ -1,0 +1,6 @@
+# Daml-independent: exercises the daml-debug-info/v1 consumer (SourceIndex),
+# DAR/sidecar discovery, schema compatibility, and the runtime debug-trace
+# normalizer against committed fixtures.
+# RUN: %python %root/tests/check-debug-info.py %root | FileCheck %s
+
+# CHECK: debug-info v1 checks passed

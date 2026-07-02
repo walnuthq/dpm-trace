@@ -5,3 +5,6 @@ spec:
     - name: trace
       path: bin/dpm-trace
       desc: Visualize and compare Canton transactions
+    - name: debug
+      path: bin/dpm-debug
+      desc: Source-level debugging for Daml Script runs

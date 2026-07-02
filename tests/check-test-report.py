@@ -29,6 +29,7 @@ def main() -> int:
         TestCaseResult,
         _eval_replay,
         completion_source_diagnostics,
+        component_yaml_text,
         daml_child_env,
         find_config,
         http_json,
@@ -272,6 +273,16 @@ def main() -> int:
     check("    dpm-trace:" in text, "install-plugin did not register dpm-trace in the manifest")
     check("dpm-trace:" in text and text.index("dpm-trace:") < text.index("  assistant:"),
           "install-plugin placed dpm-trace under assistant: instead of components:")
+
+    # 5b. install-plugin writes the same component.yaml as the committed one,
+    #     and both expose the trace + debug commands with their bin shims.
+    embedded_component = component_yaml_text()
+    committed_component = (repo_root / "component.yaml").read_text(encoding="utf-8")
+    check(embedded_component == committed_component,
+          "component_yaml_text() drifted from the committed component.yaml")
+    for needle in ("name: trace", "path: bin/dpm-trace", "name: debug", "path: bin/dpm-debug"):
+        check(needle in embedded_component, f"component.yaml is missing {needle!r}")
+    check((repo_root / "bin" / "dpm-debug").exists(), "bin/dpm-debug shim is missing")
 
     # 6. Source-linked replay confidence flag: the PoC evaluator must mark
     #    un-reducable expressions (e.g. `*`, `if`) as not evaluated rather than

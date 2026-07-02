@@ -1,0 +1,189 @@
+{
+  "schema": "daml-debug-info/v1",
+  "producer": {
+    "tool": "damlc",
+    "version": "3.4.0-snapshot",
+    "buildMode": "experimental",
+    "features": ["source-spans", "symbols", "lf-refs", "value-slots", "steps"]
+  },
+  "package": {
+    "packageId": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "name": "asset-demo",
+    "version": "1.0.0",
+    "lfVersion": "2.1",
+    "sdkVersion": "3.4.0"
+  },
+  "sources": [
+    {
+      "id": "src:Asset",
+      "module": "Asset",
+      "uri": "daml://asset-demo/Asset.daml",
+      "path": "Asset.daml",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "spans": [
+    {
+      "id": "span:Asset:Asset",
+      "source": "src:Asset",
+      "kind": "template-definition",
+      "start": {"line": 9, "column": 1},
+      "end": {"line": 23, "column": 42}
+    },
+    {
+      "id": "span:Asset:Asset:Transfer",
+      "source": "src:Asset",
+      "kind": "choice-definition",
+      "start": {"line": 18, "column": 5},
+      "end": {"line": 23, "column": 42}
+    },
+    {
+      "id": "span:Asset:test_transfer",
+      "source": "src:Asset",
+      "kind": "value-definition",
+      "start": {"line": 26, "column": 1},
+      "end": {"line": 34, "column": 10}
+    }
+  ],
+  "symbols": [
+    {
+      "id": "sym:Asset",
+      "kind": "module",
+      "module": "Asset",
+      "name": "Asset",
+      "qualifiedName": "Asset",
+      "source": "src:Asset"
+    },
+    {
+      "id": "sym:Asset:Asset",
+      "kind": "template",
+      "module": "Asset",
+      "name": "Asset",
+      "qualifiedName": "Asset:Asset",
+      "span": "span:Asset:Asset",
+      "source": "src:Asset",
+      "lfRef": {
+        "packageId": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "module": "Asset",
+        "entity": "Asset"
+      }
+    },
+    {
+      "id": "sym:Asset:Asset:Transfer",
+      "kind": "choice",
+      "module": "Asset",
+      "name": "Transfer",
+      "qualifiedName": "Asset:Asset.Transfer",
+      "parent": "sym:Asset:Asset",
+      "span": "span:Asset:Asset:Transfer",
+      "source": "src:Asset",
+      "lfRef": {
+        "packageId": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "module": "Asset",
+        "entity": "Asset",
+        "choice": "Transfer"
+      }
+    },
+    {
+      "id": "sym:Asset:test_transfer",
+      "kind": "value",
+      "module": "Asset",
+      "name": "test_transfer",
+      "qualifiedName": "Asset:test_transfer",
+      "span": "span:Asset:test_transfer",
+      "source": "src:Asset",
+      "type": "Script ()"
+    },
+    {
+      "id": "sym:Asset:future",
+      "kind": "future-symbol-kind",
+      "module": "Asset",
+      "name": "future",
+      "qualifiedName": "Asset:future",
+      "futureField": "unknown symbol kinds and fields must be ignored"
+    }
+  ],
+  "valueSlots": [
+    {
+      "id": "slot:Asset:Asset:payload:owner",
+      "symbol": "sym:Asset:Asset",
+      "name": "owner",
+      "kind": "contract-payload-field",
+      "type": "Party",
+      "availability": "transaction-visible"
+    },
+    {
+      "id": "slot:Asset:Asset:Transfer:argument:newOwner",
+      "symbol": "sym:Asset:Asset:Transfer",
+      "name": "newOwner",
+      "kind": "choice-argument-field",
+      "type": "Party",
+      "availability": "transaction-visible"
+    },
+    {
+      "id": "slot:Asset:Asset:Transfer:controllers",
+      "symbol": "sym:Asset:Asset:Transfer",
+      "name": "controllers",
+      "kind": "choice-controllers",
+      "type": "[Party]",
+      "availability": "interpreter-only"
+    },
+    {
+      "id": "slot:Asset:Asset:Transfer:result",
+      "symbol": "sym:Asset:Asset:Transfer",
+      "name": "result",
+      "kind": "choice-result",
+      "type": "ContractId Asset",
+      "availability": "transaction-visible"
+    }
+  ],
+  "steps": [
+    {
+      "id": "step:Asset:test_transfer:0",
+      "symbol": "sym:Asset:test_transfer",
+      "index": 0,
+      "source": "src:Asset",
+      "start": {"line": 27, "column": 3},
+      "end": {"line": 27, "column": 33}
+    },
+    {
+      "id": "step:Asset:test_transfer:1",
+      "symbol": "sym:Asset:test_transfer",
+      "index": 1,
+      "source": "src:Asset",
+      "start": {"line": 28, "column": 3},
+      "end": {"line": 28, "column": 29}
+    },
+    {
+      "id": "step:Asset:test_transfer:2",
+      "symbol": "sym:Asset:test_transfer",
+      "index": 2,
+      "source": "src:Asset",
+      "start": {"line": 29, "column": 3},
+      "end": {"line": 30, "column": 68}
+    },
+    {
+      "id": "step:Asset:test_transfer:3",
+      "symbol": "sym:Asset:test_transfer",
+      "index": 3,
+      "source": "src:Asset",
+      "start": {"line": 31, "column": 3},
+      "end": {"line": 31, "column": 29}
+    },
+    {
+      "id": "step:Asset:test_transfer:4",
+      "symbol": "sym:Asset:test_transfer",
+      "index": 4,
+      "source": "src:Asset",
+      "start": {"line": 32, "column": 3},
+      "end": {"line": 33, "column": 51}
+    }
+  ],
+  "compatibility": {
+    "minConsumerSchema": "daml-debug-info/v1",
+    "ignoreUnknownFields": true
+  },
+  "vendorExtensions": {
+    "x-forward-compat": "unknown top-level fields must be ignored"
+  }
+}

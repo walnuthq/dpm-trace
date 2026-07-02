@@ -1,0 +1,19 @@
+# Daml-independent: renders a recorded Daml Script runtime debug trace (JSONL)
+# with daml-debug-info/v1 metadata, so it runs without a Daml toolchain.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli debug %root/tests/fixtures/debug-info-v1/run.debug-trace.jsonl --debug-info %root/tests/fixtures/debug-info-v1/asset.debug-info.json --color never | FileCheck %s
+
+# CHECK: Daml Script debug trace
+# CHECK: script: Asset:test_transfer
+# CHECK: script-start Asset:test_transfer
+# CHECK: submission actAs=Alice::1220ab
+# CHECK-SAME: Asset.daml:29
+# CHECK: created Asset:Asset
+# CHECK-SAME: Asset.daml:9
+# CHECK-NEXT: with issuer = Alice::1220ab, owner = Alice::1220ab, label = Gem
+# CHECK: trace "transferring asset"
+# CHECK-SAME: Asset.daml:31
+# CHECK: exercised Asset:Asset Transfer
+# CHECK-SAME: Asset.daml:18
+# CHECK-NEXT: with newOwner = Bob::1220cd
+# CHECK: script-end success
+# CHECK: status: success
