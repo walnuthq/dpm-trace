@@ -1,0 +1,54 @@
+name: release
+
+# Tag-driven: pushing v* builds the cross-platform archives and opens a draft
+# release. The draft is deliberate (.goreleaser.yaml sets release.draft) -- the
+# notes get a human pass before anyone can download them.
+on:
+  push:
+    tags:
+      - "v*"
+  # Lets a release be re-cut without moving the tag, e.g. after a failed upload.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser derives the version and changelog from tag history, so a
+          # shallow clone produces a release named after the wrong commit.
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The gate the tag should have passed on main anyway. Running it here too
+      # means a broken binary cannot reach a release page because someone
+      # tagged the wrong commit.
+      - name: Test
+        run: go test ./...
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Proves the archive a user downloads actually runs, and that the binary
+      # sits where component.yaml will declare it.
+      - name: Smoke-test the linux archive
+        run: |
+          tar xzf dist/dpm-trace_*_linux_amd64.tar.gz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/bin/dpm-trace" --version

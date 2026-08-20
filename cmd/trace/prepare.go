@@ -150,7 +150,8 @@ func parseSubmissionFlags(name string, args []string) (submissionOpts, ledger.Co
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		value, ok := "", true
+		var value string
+		var ok bool
 		switch arg {
 		case "--print-json":
 			opts.printJSON = true

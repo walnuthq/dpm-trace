@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -22,15 +23,28 @@ import (
 // ComponentName is the DPM component this binary registers as.
 const ComponentName = "dpm-trace"
 
-// ComponentYAML is the component descriptor DPM reads to find the command.
-const ComponentYAML = `apiVersion: digitalasset.com/v1
+// BinaryName is the file name the component's executable is installed under.
+// Windows will not run an extensionless file, so the suffix is not cosmetic.
+func BinaryName() string {
+	if runtime.GOOS == "windows" {
+		return ComponentName + ".exe"
+	}
+	return ComponentName
+}
+
+// ComponentYAML is the component descriptor DPM reads to find the command. The
+// path has to match what Install actually wrote, including the .exe suffix, or
+// DPM looks for a file that is not there.
+func ComponentYAML() string {
+	return `apiVersion: digitalasset.com/v1
 kind: Component
 spec:
   commands:
     - name: trace
-      path: bin/dpm-trace
+      path: bin/` + BinaryName() + `
       desc: Visualize and compare Canton transactions
 `
+}
 
 // Options configure installation.
 type Options struct {
@@ -66,7 +80,7 @@ func Install(w io.Writer, opts Options) error {
 
 	manifest := filepath.Join(home, "cache", "sdk", "open-source", sdkVersion+".yaml")
 	if _, err := os.Stat(manifest); err != nil {
-		return fmt.Errorf("SDK manifest not found: %s\nInstall the SDK first (e.g. `dpm install %s`).",
+		return fmt.Errorf("SDK manifest not found: %s\nInstall the SDK first (e.g. `dpm install %s`)",
 			manifest, sdkVersion)
 	}
 
@@ -82,10 +96,10 @@ func Install(w io.Writer, opts Options) error {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(componentDir, "component.yaml"), []byte(ComponentYAML), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(componentDir, "component.yaml"), []byte(ComponentYAML()), 0o644); err != nil {
 		return err
 	}
-	if err := copyExecutable(source, filepath.Join(binDir, ComponentName)); err != nil {
+	if err := copyExecutable(source, filepath.Join(binDir, BinaryName())); err != nil {
 		return err
 	}
 	if err := RegisterInManifest(manifest, ComponentName, version); err != nil {

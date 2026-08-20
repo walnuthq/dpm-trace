@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -242,5 +243,24 @@ func TestDetectSDKVersionWithoutManifests(t *testing.T) {
 func TestActiveDPMVersionWithoutDPM(t *testing.T) {
 	if got := ActiveDPMVersion(t.TempDir()); got != "" {
 		t.Errorf("got %q with no dpm binary, want empty", got)
+	}
+}
+
+// The descriptor has to name the file Install actually wrote. Windows will not
+// run an extensionless binary, so the two must agree about the .exe suffix or
+// DPM looks for a file that is not there.
+func TestComponentYAMLNamesTheInstalledBinary(t *testing.T) {
+	descriptor := ComponentYAML()
+	want := "path: bin/" + BinaryName()
+	if !strings.Contains(descriptor, want) {
+		t.Errorf("descriptor does not declare %q:\n%s", want, descriptor)
+	}
+
+	expected := ComponentName
+	if runtime.GOOS == "windows" {
+		expected += ".exe"
+	}
+	if got := BinaryName(); got != expected {
+		t.Errorf("BinaryName() = %q, want %q on %s", got, expected, runtime.GOOS)
 	}
 }

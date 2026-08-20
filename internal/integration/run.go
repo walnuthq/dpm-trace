@@ -211,7 +211,6 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 
 	code := 0
 	if litErr != nil {
-		code = 1
 		var exit *exec.ExitError
 		if errors.As(litErr, &exit) {
 			code = exit.ExitCode()
@@ -252,7 +251,7 @@ func WaitForParties(placements []PartyEndpoint, canton *exec.Cmd, logPath string
 		// the full timeout. Signal 0 asks the OS whether the process is still
 		// alive without touching it.
 		if canton.Process != nil && canton.Process.Signal(syscall.Signal(0)) != nil {
-			return nil, fmt.Errorf("Canton exited during startup:\n%s", ReadTail(logPath, 40))
+			return nil, fmt.Errorf("canton exited during startup:\n%s", ReadTail(logPath, 40))
 		}
 
 		for _, placement := range placements {
@@ -278,7 +277,7 @@ func WaitForParties(placements []PartyEndpoint, canton *exec.Cmd, logPath string
 		}
 		time.Sleep(time.Second)
 	}
-	return nil, fmt.Errorf("Canton did not become ready within %ds (last error: %s)", timeout, lastError)
+	return nil, fmt.Errorf("canton did not become ready within %ds (last error: %s)", timeout, lastError)
 }
 
 // lookupParty asks a participant for its parties and returns the full id of

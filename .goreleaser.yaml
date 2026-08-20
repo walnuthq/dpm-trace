@@ -9,7 +9,11 @@ before:
 builds:
   - id: dpm-trace
     main: ./cmd/trace
-    binary: dpm-trace
+    # bin/dpm-trace, not dpm-trace: internal/plugin installs to
+    # <component>/bin/dpm-trace and component.yaml declares that path, so an
+    # archive with the binary at its root describes a layout it does not have.
+    # goreleaser appends .exe on Windows, matching plugin.BinaryName().
+    binary: bin/dpm-trace
     # Static binaries: a DPM component must run with no runtime prerequisite.
     # Removing the Python interpreter requirement is the point of the port.
     env:
@@ -36,10 +40,20 @@ archives:
       - goos: windows
         formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    
     files:
       - LICENSE
       - README.md
-      - component.yaml
+      - docs/*.md
+      # The committed trace artifacts the README tells the reader to open.
+      - examples/*.json
+      - examples/README.md
+      # Source for the example package, so the DAR can be rebuilt.
+      - examples/asset/daml.yaml
+      - examples/asset/daml/*
+      # The Canton config both READMEs tell the reader to boot.
+      - examples/devnet-trace.conf
+      - examples/devnet-trace.bootstrap.canton
 
 checksum:
   name_template: checksums.txt

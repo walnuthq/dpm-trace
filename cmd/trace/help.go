@@ -32,7 +32,7 @@ func writeSection(w io.Writer, title string, rows [][2]string) {
 	for _, row := range rows {
 		fmt.Fprintf(tw, "  %s\t%s\n", row[0], row[1])
 	}
-	tw.Flush()
+	_ = tw.Flush()
 }
 
 func flagRows(flags []flagDoc) [][2]string {

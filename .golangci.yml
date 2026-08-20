@@ -1,0 +1,34 @@
+version: "2"
+
+# The default set plus nothing exotic. This repository is stdlib-only, so the
+# value here is catching dead assignments, unchecked errors that matter, and
+# staticcheck's correctness rules -- not enforcing a house style.
+linters:
+  default: standard
+  exclusions:
+    rules:
+      # Writes to a terminal writer are the CLI's whole output path, and there
+      # is nothing to do with the error: if stdout is gone, the message it
+      # would carry is gone too. Checking every Fprintf would add a branch to
+      # several hundred call sites and hide the ones that matter.
+      - linters: [errcheck]
+        source: "^\\s*fmt\\.Fprint(f|ln)?\\("
+
+      # Test helpers close over *testing.T and fail there instead.
+      - linters: [errcheck]
+        path: _test\.go
+
+      # Best-effort cleanup: the operation being cleaned up has already either
+      # succeeded or failed, and a failed removal changes neither outcome.
+      - linters: [errcheck]
+        source: "os\\.(Remove|RemoveAll)\\(|\\.Close\\(\\)"
+
+  settings:
+    staticcheck:
+      # QF* are editor quick-fixes ("could use a tagged switch"), not
+      # correctness findings. ST/SA stay on.
+      checks: ["all", "-QF1002", "-QF1003"]
+
+formatters:
+  enable:
+    - gofmt

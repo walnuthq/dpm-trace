@@ -28,7 +28,7 @@ per party — which is the point of the participant-scoped labelling in the outp
 
 ## Reproducing them against a local Canton
 
-The repo ships a Canton config for exactly this — [`devnet-trace-poc.conf`](devnet-trace-poc.conf),
+The repo ships a Canton config for exactly this — [`devnet-trace.conf`](devnet-trace.conf),
 two participants with fixed ports — plus a bootstrap script that uploads the DAR
 and allocates the parties:
 
@@ -40,8 +40,8 @@ Everything below needs only this repository and a Canton jar.
 
 java -Ddpm.dar-path="$PWD/examples/asset/.daml/dist/asset-tests-1.0.0.dar" \
   -jar /path/to/canton-open-source-<version>.jar daemon \
-  -c examples/devnet-trace-poc.conf \
-  --bootstrap examples/devnet-trace-poc.bootstrap.canton --no-tty
+  -c examples/devnet-trace.conf \
+  --bootstrap examples/devnet-trace.bootstrap.canton --no-tty
 # => === dpm-trace examples ready: participant1 http://127.0.0.1:6113, participant2 http://127.0.0.1:6123 ===
 ```
 

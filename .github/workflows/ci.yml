@@ -9,6 +9,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # gofmt and go vet run in the `go` job; this adds staticcheck, errcheck
+      # and ineffassign. Configuration, including why fmt.Fprint* is excluded
+      # from errcheck, is in .golangci.yml.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.0
+
   go:
     name: go build + test
     runs-on: ubuntu-latest

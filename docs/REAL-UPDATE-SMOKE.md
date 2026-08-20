@@ -17,8 +17,8 @@ concrete local values.
 
 java -Ddpm.dar-path="$PWD/examples/asset/.daml/dist/asset-tests-1.0.0.dar" \
   -jar <path-to-canton.jar> daemon \
-  -c examples/devnet-trace-poc.conf \
-  --bootstrap examples/devnet-trace-poc.bootstrap.canton --no-tty
+  -c examples/devnet-trace.conf \
+  --bootstrap examples/devnet-trace.bootstrap.canton --no-tty
 ```
 
 The bootstrap uploads the DAR, allocates the parties, and prints the ready

@@ -1,10 +1,10 @@
-// Bootstrap for examples/devnet-trace-poc.conf: start the nodes, connect both
+// Bootstrap for examples/devnet-trace.conf: start the nodes, connect both
 // participants to the synchronizer, upload the DAR, allocate the parties the
 // examples use. Pair them with:
 //
 //   java -Ddpm.dar-path=/abs/path/to/app.dar -jar canton-open-source-<v>.jar \
-//     daemon -c examples/devnet-trace-poc.conf \
-//     --bootstrap examples/devnet-trace-poc.bootstrap.canton --no-tty
+//     daemon -c examples/devnet-trace.conf \
+//     --bootstrap examples/devnet-trace.bootstrap.canton --no-tty
 nodes.local.start()
 bootstrap.synchronizer_local()
 participant1.synchronizers.connect_local(sequencer1, alias = "da")

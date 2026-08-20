@@ -27,7 +27,7 @@ func TestParseScalarInfersTypes(t *testing.T) {
 		}
 	}
 	if _, ok := ParseScalar(`{"a":1}`).(map[string]any); !ok {
-		if _, isObject := ParseScalar(`{"a":1}`).(any); !isObject {
+		if ParseScalar(`{"a":1}`) == nil {
 			t.Error("object literal should decode")
 		}
 	}
