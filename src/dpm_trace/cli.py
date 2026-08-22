@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -135,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         argv = argv[1:]
     # Handled after the leading-"trace" strip so both `dpm trace debug ...`
     # and a top-level `dpm debug` (via bin/dpm-debug) reach the same entry.
+    if argv and argv[0] == "debug-info":
+        return debug_info_main(argv[1:])
     if argv and argv[0] == "debug":
         return debug_main(argv[1:])
     if argv and argv[0] == "open":
@@ -5470,6 +5472,354 @@ def short(value: str | None, max_len: int = 32) -> str:
     if len(value) <= max_len:
         return value
     return value[: max_len - 3] + "..."
+
+
+# --- daml-debug-info verification -------------------------------------------
+
+DEBUG_INFO_SCHEMA_V1 = "daml-debug-info/v1"
+
+# Slot kinds that can never be populated from participant-visible transaction
+# data. A producer that labels one of these transaction-visible is claiming a
+# value it cannot have. See daml-debug-info-v1.md section 6.
+INTERPRETER_ONLY_SLOT_KINDS = frozenset({
+    "choice-observers",
+    "choice-authorizers",
+    "precondition",
+    "key-maintainers",
+    "exception-message",
+})
+
+VALID_AVAILABILITY = frozenset({"transaction-visible", "interpreter-only"})
+
+REQUIRED_TOP_LEVEL = ("schema", "version", "producer", "package", "sources",
+                      "spans", "symbols", "valueSlots", "steps")
+
+
+class DebugInfoFinding:
+    """One verification failure, with enough context to fix it."""
+
+    __slots__ = ("level", "code", "where", "message")
+
+    def __init__(self, level: str, code: str, where: str, message: str) -> None:
+        self.level = level
+        self.code = code
+        self.where = where
+        self.message = message
+
+    def as_dict(self) -> dict[str, str]:
+        return {"level": self.level, "code": self.code, "where": self.where, "message": self.message}
+
+    def __str__(self) -> str:
+        return f"{self.level}: {self.code}: {self.where}: {self.message}"
+
+
+def _pos_ok(pos: Any) -> bool:
+    return (
+        isinstance(pos, dict)
+        and isinstance(pos.get("line"), int)
+        and isinstance(pos.get("column"), int)
+        and pos["line"] >= 1
+        and pos["column"] >= 1
+    )
+
+
+def _span_ordered(start: Any, end: Any) -> bool:
+    if not (_pos_ok(start) and _pos_ok(end)):
+        return False
+    if end["line"] != start["line"]:
+        return end["line"] > start["line"]
+    return end["column"] >= start["column"]
+
+
+def verify_debug_info(
+    data: dict[str, Any],
+    *,
+    source_root: Path | None = None,
+    package_id: str | None = None,
+) -> list[DebugInfoFinding]:
+    """Check a daml-debug-info document against the specification.
+
+    Three levels, matching daml-debug-info-v1.md section 11: structure,
+    internal consistency, and agreement with the artifacts described. The
+    third level only runs for what the caller supplied, so a document can be
+    checked on its own or against a DAR and a source tree.
+    """
+    out: list[DebugInfoFinding] = []
+    add = lambda level, code, where, msg: out.append(DebugInfoFinding(level, code, where, msg))
+
+    # --- structure ---
+    schema = data.get("schema")
+    if schema != DEBUG_INFO_SCHEMA_V1:
+        add("error", "schema", "$.schema", f"expected {DEBUG_INFO_SCHEMA_V1!r}, found {schema!r}")
+        return out  # nothing else is meaningful against an unknown schema
+
+    for field in REQUIRED_TOP_LEVEL:
+        if field not in data:
+            add("error", "missing-field", f"$.{field}", "required by the specification")
+
+    version = data.get("version")
+    if version is None:
+        pass  # already reported above
+    elif not isinstance(version, str) or not re.fullmatch(r"1\.\d+", version):
+        add("error", "version", "$.version", f"expected MAJOR.MINOR with major 1, found {version!r}")
+
+    producer = data.get("producer")
+    if isinstance(producer, dict):
+        for field in ("tool", "version", "buildMode", "features"):
+            if field not in producer:
+                add("error", "missing-field", f"$.producer.{field}", "required by the specification")
+    package = data.get("package")
+    if isinstance(package, dict):
+        for field in ("packageId", "name", "lfVersion", "sdkVersion"):
+            if field not in package:
+                add("error", "missing-field", f"$.package.{field}", "required by the specification")
+        pid = package.get("packageId")
+        if isinstance(pid, str) and not re.fullmatch(r"[0-9a-f]{64}", pid):
+            add("error", "package-id", "$.package.packageId", f"not a 64-character hex id: {pid!r}")
+
+    # --- internal consistency ---
+    source_ids: set[str] = set()
+    source_by_id: dict[str, dict[str, Any]] = {}
+    for i, src in enumerate(data.get("sources") or []):
+        where = f"$.sources[{i}]"
+        if not isinstance(src, dict):
+            add("error", "shape", where, "not an object")
+            continue
+        sid = src.get("id")
+        if not isinstance(sid, str) or not sid:
+            add("error", "missing-field", f"{where}.id", "required")
+            continue
+        if sid in source_ids:
+            add("error", "duplicate-id", f"{where}.id", f"source id {sid!r} used more than once")
+        source_ids.add(sid)
+        source_by_id[sid] = src
+        path = src.get("path")
+        if not isinstance(path, str) or not path:
+            add("error", "missing-field", f"{where}.path", "required")
+        elif PurePosixPath(path).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", path) or path.startswith("~"):
+            add("error", "absolute-path", f"{where}.path", f"must be package-relative, found {path!r}")
+        digest = src.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest or ""):
+            add("error", "sha256", f"{where}.sha256", f"not a sha256 digest: {digest!r}")
+
+    span_ids: set[str] = set()
+    for i, span in enumerate(data.get("spans") or []):
+        where = f"$.spans[{i}]"
+        if not isinstance(span, dict):
+            add("error", "shape", where, "not an object")
+            continue
+        sid = span.get("id")
+        if isinstance(sid, str) and sid:
+            if sid in span_ids:
+                add("error", "duplicate-id", f"{where}.id", f"span id {sid!r} used more than once")
+            span_ids.add(sid)
+        else:
+            add("error", "missing-field", f"{where}.id", "required")
+        ref = span.get("source")
+        if ref not in source_ids:
+            add("error", "unresolved-ref", f"{where}.source", f"no source with id {ref!r}")
+        if not _span_ordered(span.get("start"), span.get("end")):
+            add("error", "span", where, "start and end must be 1-based positions with end at or after start")
+
+    symbol_ids: set[str] = set()
+    symbols = data.get("symbols") or []
+    for i, sym in enumerate(symbols):
+        where = f"$.symbols[{i}]"
+        if not isinstance(sym, dict):
+            add("error", "shape", where, "not an object")
+            continue
+        sid = sym.get("id")
+        if isinstance(sid, str) and sid:
+            if sid in symbol_ids:
+                add("error", "duplicate-id", f"{where}.id", f"symbol id {sid!r} used more than once")
+            symbol_ids.add(sid)
+        else:
+            add("error", "missing-field", f"{where}.id", "required")
+    # second pass so forward references to later symbols resolve
+    for i, sym in enumerate(symbols):
+        if not isinstance(sym, dict):
+            continue
+        where = f"$.symbols[{i}]"
+        parent = sym.get("parent")
+        if parent is not None and parent not in symbol_ids:
+            add("error", "unresolved-ref", f"{where}.parent", f"no symbol with id {parent!r}")
+        span_ref = sym.get("span")
+        if span_ref is not None and span_ref not in span_ids:
+            add("error", "unresolved-ref", f"{where}.span", f"no span with id {span_ref!r}")
+        src_ref = sym.get("source")
+        if src_ref is not None and src_ref not in source_ids:
+            add("error", "unresolved-ref", f"{where}.source", f"no source with id {src_ref!r}")
+
+    for i, slot in enumerate(data.get("valueSlots") or []):
+        where = f"$.valueSlots[{i}]"
+        if not isinstance(slot, dict):
+            add("error", "shape", where, "not an object")
+            continue
+        owner = slot.get("symbol")
+        if owner not in symbol_ids:
+            add("error", "unresolved-ref", f"{where}.symbol", f"no symbol with id {owner!r}")
+        availability = slot.get("availability")
+        if availability not in VALID_AVAILABILITY:
+            add("error", "availability", f"{where}.availability", f"not a known availability: {availability!r}")
+        elif slot.get("kind") in INTERPRETER_ONLY_SLOT_KINDS and availability != "interpreter-only":
+            add(
+                "error",
+                "over-permissive-availability",
+                f"{where}.availability",
+                f"{slot.get('kind')!r} is never in transaction data and must be interpreter-only",
+            )
+
+    for i, site in enumerate(data.get("failureSites") or []):
+        where = f"$.failureSites[{i}]"
+        if not isinstance(site, dict):
+            add("error", "shape", where, "not an object")
+            continue
+        if site.get("symbol") not in symbol_ids:
+            add("error", "unresolved-ref", f"{where}.symbol", f"no symbol with id {site.get('symbol')!r}")
+        if site.get("source") not in source_ids:
+            add("error", "unresolved-ref", f"{where}.source", f"no source with id {site.get('source')!r}")
+        if not _span_ordered(site.get("start"), site.get("end")):
+            add("error", "span", where, "start and end must be 1-based positions with end at or after start")
+
+    for i, step in enumerate(data.get("steps") or []):
+        where = f"$.steps[{i}]"
+        if not isinstance(step, dict):
+            add("error", "shape", where, "not an object")
+            continue
+        if step.get("symbol") not in symbol_ids:
+            add("error", "unresolved-ref", f"{where}.symbol", f"no symbol with id {step.get('symbol')!r}")
+        if step.get("source") not in source_ids:
+            add("error", "unresolved-ref", f"{where}.source", f"no source with id {step.get('source')!r}")
+        if not isinstance(step.get("index"), int) or step.get("index", -1) < 0:
+            add("error", "step-index", f"{where}.index", f"expected a non-negative integer, found {step.get('index')!r}")
+        if not _span_ordered(step.get("start"), step.get("end")):
+            add("error", "span", where, "start and end must be 1-based positions with end at or after start")
+
+    declared = set(data.get("unmappedModules") or [])
+    mapped = {s.get("module") for s in (data.get("sources") or []) if isinstance(s, dict)}
+    for module in sorted(declared & mapped):
+        add("error", "unmapped-module", "$.unmappedModules",
+            f"module {module!r} is listed as unmapped but also has a source entry")
+
+    # --- against the artifacts described ---
+    if package_id is not None and isinstance(package, dict):
+        declared_id = package.get("packageId")
+        if declared_id != package_id:
+            add("error", "package-mismatch", "$.package.packageId",
+                f"metadata describes {declared_id!r} but the package is {package_id!r}")
+
+    if source_root is not None:
+        for sid, src in sorted(source_by_id.items()):
+            path = src.get("path")
+            digest = src.get("sha256")
+            if not isinstance(path, str) or not isinstance(digest, str):
+                continue
+            resolved = (source_root / path)
+            if not resolved.is_file():
+                add("warning", "source-missing", f"$.sources[{sid}].path",
+                    f"{path} not found under {source_root}")
+                continue
+            raw = resolved.read_bytes()
+            actual = hashlib.sha256(raw).hexdigest()
+            if actual != digest:
+                normalized = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+                if normalized == digest:
+                    add("warning", "line-endings", f"$.sources[{sid}].sha256",
+                        f"{path} matches only after newline normalization, so this checkout has "
+                        "translated line endings (see git core.autocrlf)")
+                else:
+                    add("error", "stale-source", f"$.sources[{sid}].sha256",
+                        f"{path} on disk is not the file that was compiled")
+                continue
+            # spans can only be bounds-checked against a file that matches
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+            for i, span in enumerate(data.get("spans") or []):
+                if not isinstance(span, dict) or span.get("source") != sid:
+                    continue
+                end = span.get("end")
+                if not _pos_ok(end):
+                    continue
+                if end["line"] > len(lines):
+                    add("error", "span-out-of-range", f"$.spans[{i}]",
+                        f"ends at line {end['line']} but {path} has {len(lines)} lines")
+
+    return out
+
+
+def debug_info_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm debug-info",
+        description="Inspect and verify daml-debug-info artifacts.",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    verify = sub.add_parser("verify", help="check a debug-info artifact against the specification")
+    verify.add_argument("target", help="a .dar, or a daml-debug-info JSON artifact")
+    verify.add_argument("--source-root", help="directory the package-relative source paths resolve against")
+    verify.add_argument("--json", action="store_true", help="machine-readable output for CI")
+    verify.add_argument("--strict", action="store_true", help="treat warnings as failures")
+    args = parser.parse_args(argv)
+
+    target = Path(args.target).expanduser()
+    if not target.exists():
+        print(f"dpm debug-info: no such file: {target}", file=sys.stderr)
+        return 2
+
+    documents: list[tuple[str, dict[str, Any]]] = []
+    if target.suffix == ".dar":
+        try:
+            with zipfile.ZipFile(target) as archive:
+                for name in archive.namelist():
+                    if name.startswith("META-INF/daml-debug-info") and name.endswith(".json"):
+                        documents.append((f"{target}!{name}", json.loads(archive.read(name).decode("utf-8"))))
+        except (zipfile.BadZipFile, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(f"dpm debug-info: cannot read {target}: {exc}", file=sys.stderr)
+            return 2
+        for sidecar in (target.with_suffix(".debug-info.json"), Path(str(target) + ".debug-info.json")):
+            if sidecar.is_file():
+                try:
+                    documents.append((str(sidecar), json.loads(sidecar.read_text(encoding="utf-8"))))
+                except (OSError, json.JSONDecodeError) as exc:
+                    print(f"dpm debug-info: cannot read {sidecar}: {exc}", file=sys.stderr)
+                    return 2
+        if not documents:
+            print(f"dpm debug-info: {target} carries no daml-debug-info artifact", file=sys.stderr)
+            return 2
+    else:
+        try:
+            documents.append((str(target), json.loads(target.read_text(encoding="utf-8"))))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"dpm debug-info: cannot read {target}: {exc}", file=sys.stderr)
+            return 2
+
+    source_root = Path(args.source_root).expanduser() if args.source_root else None
+    results: list[dict[str, Any]] = []
+    failed = False
+    for where, data in documents:
+        if not isinstance(data, dict):
+            findings = [DebugInfoFinding("error", "shape", "$", "not a JSON object")]
+        else:
+            findings = verify_debug_info(data, source_root=source_root)
+        errors = [f for f in findings if f.level == "error"]
+        warnings = [f for f in findings if f.level == "warning"]
+        ok = not errors and not (args.strict and warnings)
+        failed = failed or not ok
+        results.append({
+            "artifact": where,
+            "ok": ok,
+            "errors": len(errors),
+            "warnings": len(warnings),
+            "findings": [f.as_dict() for f in findings],
+        })
+
+    if args.json:
+        print(json.dumps({"ok": not failed, "results": results}, indent=2))
+    else:
+        for result in results:
+            status = "ok" if result["ok"] else "FAILED"
+            print(f"{result['artifact']}: {status} ({result['errors']} errors, {result['warnings']} warnings)")
+            for finding in result["findings"]:
+                print(f"  {finding['level']}: {finding['code']}: {finding['where']}: {finding['message']}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
