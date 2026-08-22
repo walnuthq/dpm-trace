@@ -3891,7 +3891,7 @@ class SourceIndex:
     def _load_dar_debug_info(self, dar: Path) -> None:
         """Auto-discover daml-debug-info emitted alongside or inside a DAR.
 
-        `damlc build --experimental-debug-info` writes a sidecar
+        `damlc build --debug-info` writes a sidecar
         `<name>.debug-info.json` next to the DAR and embeds the same artifact
         as `META-INF/daml-debug-info/<package-id>.json` (older prototypes used
         `META-INF/daml-debug-info.json`) inside the DAR zip.

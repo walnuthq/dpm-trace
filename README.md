@@ -396,7 +396,7 @@ lit tests/real-canton-failed-completion.test
 
 ## Using compiler debug info (daml-debug-info/v1)
 
-`damlc build --experimental-debug-info` emits a `daml-debug-info/v1` JSON
+`damlc build --debug-info` emits a `daml-debug-info/v1` JSON
 artifact as a sidecar next to the DAR (`<name>.debug-info.json`) and embedded
 in the DAR itself (`META-INF/daml-debug-info/<package-id>.json`). dpm-trace
 consumes both:
