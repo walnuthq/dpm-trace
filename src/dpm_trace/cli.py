@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -127,6 +128,646 @@ class DebugStep:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# dpm profile: transaction cost profiling
+#
+# Canton meters sequenced traffic in bytes and bills it in Canton Coin, so a
+# model that grows by a field is a recurring cost. Nothing in the toolchain
+# attributes that cost to the choice, template, or payload field that caused
+# it. This is the prototype for that attribution.
+# ---------------------------------------------------------------------------
+
+PROFILE_SCHEMA = "dpm-profile/v1"
+
+# Exit codes are part of the contract with CI: a budget breach must be
+# distinguishable from the tool falling over.
+PROFILE_EXIT_OK = 0
+PROFILE_EXIT_ERROR = 1
+PROFILE_EXIT_BUDGET = 2
+
+
+def canonical_bytes(value: Any) -> int:
+    """Byte length of a value under a deterministic compact JSON encoding.
+
+    This is a model of on-the-wire size, not the sequenced byte count. Canton
+    meters a serialized protocol message; this encoding is stable, comparable
+    between runs, and attributable to individual fields, which is what makes a
+    breakdown actionable. Where a measured wire size is available it is
+    reported next to the model rather than mixed into it.
+    """
+    if value is None:
+        return 0
+    return len(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    )
+
+
+def field_sizes(value: Any, prefix: str = "") -> dict[str, int]:
+    """Flatten a payload into dotted field paths and their encoded sizes."""
+    out: dict[str, int] = {}
+    if isinstance(value, dict) and value:
+        for key in sorted(value):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            out.update(field_sizes(value[key], path))
+    elif isinstance(value, list) and value:
+        for index, child in enumerate(value):
+            out.update(field_sizes(child, f"{prefix}[{index}]"))
+    elif prefix:
+        out[prefix] = canonical_bytes(value)
+    return out
+
+
+@dataclass
+class ProfileNode:
+    event_id: str
+    kind: str
+    template: str | None
+    choice: str | None
+    envelope_bytes: int
+    payload_bytes: int
+    total_bytes: int
+    fields: dict[str, int]
+    children: list["ProfileNode"] = field(default_factory=list)
+
+    @property
+    def self_bytes(self) -> int:
+        return self.envelope_bytes + self.payload_bytes
+
+
+def event_payload(ev: TraceEvent) -> Any:
+    if ev.kind == "create":
+        return ev.payload
+    if ev.kind == "exercise":
+        return ev.argument
+    return None
+
+
+def profile_event(trace: NormalizedTrace, event_id: str, seen: set[str]) -> ProfileNode | None:
+    if event_id in seen:
+        return None
+    seen.add(event_id)
+    ev = trace.events_by_id.get(event_id)
+    if ev is None:
+        return None
+
+    # The envelope is what the node costs before any application data: which
+    # template, which contract, which choice, and who is on it.
+    envelope = 0
+    for value in (ev.template, ev.contract_id, ev.choice):
+        envelope += canonical_bytes(value)
+    for parties in (ev.signatories, ev.observers, ev.acting_parties, ev.witnesses):
+        envelope += canonical_bytes(parties)
+
+    payload = event_payload(ev)
+    node = ProfileNode(
+        event_id=event_id,
+        kind=ev.kind,
+        template=ev.template,
+        choice=ev.choice,
+        envelope_bytes=envelope,
+        payload_bytes=canonical_bytes(payload),
+        total_bytes=0,
+        fields=field_sizes(payload),
+    )
+    for child_id in ev.child_event_ids:
+        child = profile_event(trace, child_id, seen)
+        if child is not None:
+            node.children.append(child)
+    node.total_bytes = node.self_bytes + sum(child.total_bytes for child in node.children)
+    return node
+
+
+def walk_profile(nodes: list[ProfileNode]):
+    for node in nodes:
+        yield node
+        yield from walk_profile(node.children)
+
+
+def profile_node_json(node: ProfileNode) -> dict[str, Any]:
+    return {
+        "eventId": node.event_id,
+        "kind": node.kind,
+        "template": node.template,
+        "choice": node.choice,
+        "envelopeBytes": node.envelope_bytes,
+        "payloadBytes": node.payload_bytes,
+        "selfBytes": node.self_bytes,
+        "totalBytes": node.total_bytes,
+        "fields": node.fields,
+        "children": [profile_node_json(child) for child in node.children],
+    }
+
+
+def rollup_by_template(nodes: list[ProfileNode]) -> list[dict[str, Any]]:
+    acc: dict[str, dict[str, int]] = {}
+    for node in walk_profile(nodes):
+        key = node.template or "(no template)"
+        row = acc.setdefault(key, {"nodes": 0, "envelopeBytes": 0, "payloadBytes": 0, "selfBytes": 0})
+        row["nodes"] += 1
+        row["envelopeBytes"] += node.envelope_bytes
+        row["payloadBytes"] += node.payload_bytes
+        row["selfBytes"] += node.self_bytes
+    rows = [dict(template=name, **values) for name, values in acc.items()]
+    rows.sort(key=lambda row: (-row["selfBytes"], row["template"]))
+    return rows
+
+
+def rollup_by_field(nodes: list[ProfileNode]) -> list[dict[str, Any]]:
+    acc: dict[tuple[str, str], dict[str, int]] = {}
+    for node in walk_profile(nodes):
+        template = node.template or "(no template)"
+        for path, size in node.fields.items():
+            row = acc.setdefault((template, path), {"occurrences": 0, "bytes": 0})
+            row["occurrences"] += 1
+            row["bytes"] += size
+    rows = [
+        {"template": template, "field": path, **values}
+        for (template, path), values in acc.items()
+    ]
+    rows.sort(key=lambda row: (-row["bytes"], row["template"], row["field"]))
+    return rows
+
+
+def measured_wire_bytes(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    """Ground-truth serialized size, when the artifact carries one.
+
+    A prepared transaction comes back from PrepareSubmission already
+    serialized, so its size is a fact rather than a model. A committed update
+    fetched as JSON does not carry the wire form, and we say so instead of
+    guessing.
+    """
+    response = artifact.get("response")
+    if not isinstance(response, dict):
+        return None
+    blob = response.get("preparedTransaction")
+    if not isinstance(blob, str) or not blob:
+        return None
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except Exception:
+        return None
+    return {"source": "preparedTransaction", "bytes": len(raw)}
+
+
+def build_profile(
+    *,
+    subject: str,
+    origin: str,
+    roots: list[ProfileNode],
+    price_per_byte: float | None,
+    measured: dict[str, Any] | None,
+    notes: list[str],
+) -> dict[str, Any]:
+    all_nodes = list(walk_profile(roots))
+    modeled = sum(node.self_bytes for node in all_nodes)
+    totals: dict[str, Any] = {
+        "nodes": len(all_nodes),
+        "modeledBytes": modeled,
+        "envelopeBytes": sum(node.envelope_bytes for node in all_nodes),
+        "payloadBytes": sum(node.payload_bytes for node in all_nodes),
+    }
+    if measured:
+        totals["measuredWireBytes"] = measured["bytes"]
+        totals["measuredWireSource"] = measured["source"]
+    if price_per_byte is not None:
+        basis = measured["bytes"] if measured else modeled
+        totals["estimatedCostCC"] = round(basis * price_per_byte, 9)
+        totals["pricePerByteCC"] = price_per_byte
+        totals["costBasis"] = "measuredWireBytes" if measured else "modeledBytes"
+    return {
+        "schema": PROFILE_SCHEMA,
+        "kind": "cost-profile",
+        "subject": subject,
+        "origin": origin,
+        "totals": totals,
+        "byTemplate": rollup_by_template(roots),
+        "byField": rollup_by_field(roots),
+        "tree": [profile_node_json(node) for node in roots],
+        "notes": notes,
+    }
+
+
+def profile_from_trace(
+    trace: NormalizedTrace,
+    *,
+    price_per_byte: float | None,
+    measured: dict[str, Any] | None = None,
+    notes: list[str] | None = None,
+) -> dict[str, Any]:
+    seen: set[str] = set()
+    roots = [
+        node
+        for node in (profile_event(trace, event_id, seen) for event_id in trace.root_event_ids)
+        if node is not None
+    ]
+    return build_profile(
+        subject=trace.update_id or "(prepared)",
+        origin=trace.source,
+        roots=roots,
+        price_per_byte=price_per_byte,
+        measured=measured,
+        notes=notes or [],
+    )
+
+
+def profile_from_commands(
+    artifact: dict[str, Any],
+    *,
+    price_per_byte: float | None,
+) -> dict[str, Any]:
+    """Profile a prepared artifact whose node tree is not available.
+
+    PrepareSubmission returns the serialized transaction, which gives an exact
+    total, but the JSON artifact keeps the submitted commands rather than the
+    resulting nodes. One exercise can produce many nodes, so a command-level
+    breakdown is coarser than a node-level one. Say that in the output instead
+    of presenting the two as equivalent.
+    """
+    request = artifact.get("request") or {}
+    commands = request.get("commands") or []
+    roots: list[ProfileNode] = []
+    for index, command in enumerate(commands):
+        if not isinstance(command, dict):
+            continue
+        inner = command
+        kind = "command"
+        for key in ("CreateCommand", "createCommand", "ExerciseCommand", "exerciseCommand"):
+            if isinstance(command.get(key), dict):
+                inner = command[key]
+                kind = "create" if "reate" in key else "exercise"
+                break
+        template = inner.get("templateId") or inner.get("template_id")
+        choice = inner.get("choice")
+        payload = (
+            inner.get("createArguments")
+            or inner.get("create_arguments")
+            or inner.get("choiceArgument")
+            or inner.get("choice_argument")
+        )
+        envelope = canonical_bytes(template) + canonical_bytes(choice)
+        envelope += canonical_bytes(inner.get("contractId") or inner.get("contract_id"))
+        node = ProfileNode(
+            event_id=f"command-{index}",
+            kind=kind,
+            template=template if isinstance(template, str) else None,
+            choice=choice if isinstance(choice, str) else None,
+            envelope_bytes=envelope,
+            payload_bytes=canonical_bytes(payload),
+            total_bytes=0,
+            fields=field_sizes(payload),
+        )
+        node.total_bytes = node.self_bytes
+        roots.append(node)
+    notes = [
+        "Breakdown is per submitted command, not per transaction node: the prepared "
+        "artifact carries the commands, and one exercise can produce many nodes.",
+        "For a node-level breakdown, profile the committed update with "
+        "`dpm profile tx <update-id>` or an exported trace artifact.",
+    ]
+    return build_profile(
+        subject=str(request.get("commandId") or "(prepared)"),
+        origin="prepared-command",
+        roots=roots,
+        price_per_byte=price_per_byte,
+        measured=measured_wire_bytes(artifact),
+        notes=notes,
+    )
+
+
+def format_bytes(count: int) -> str:
+    if count < 1024:
+        return f"{count} B"
+    if count < 1024 * 1024:
+        return f"{count / 1024:.1f} KiB"
+    return f"{count / (1024 * 1024):.1f} MiB"
+
+
+def render_profile_tree(nodes: list[ProfileNode], lines: list[str], depth: int = 0) -> None:
+    for node in nodes:
+        label = node.template or "(no template)"
+        if node.choice:
+            label = f"{label} :: {node.choice}"
+        lines.append(
+            f"  {'  ' * depth}{node.kind:<9} {label}  "
+            f"self {format_bytes(node.self_bytes)}  subtree {format_bytes(node.total_bytes)}"
+        )
+        render_profile_tree(node.children, lines, depth + 1)
+
+
+def render_profile(profile: dict[str, Any], *, top: int = 10) -> str:
+    totals = profile.get("totals") or {}
+    lines = [
+        "DPM cost profile",
+        f"  subject:      {profile.get('subject', '-')}",
+        f"  origin:       {profile.get('origin', '-')}",
+        f"  nodes:        {totals.get('nodes', 0)}",
+        f"  modeled:      {format_bytes(int(totals.get('modeledBytes', 0)))}"
+        f"  (envelope {format_bytes(int(totals.get('envelopeBytes', 0)))},"
+        f" payload {format_bytes(int(totals.get('payloadBytes', 0)))})",
+    ]
+    if "measuredWireBytes" in totals:
+        lines.append(
+            f"  measured:     {format_bytes(int(totals['measuredWireBytes']))}"
+            f"  (from {totals.get('measuredWireSource')})"
+        )
+    if "estimatedCostCC" in totals:
+        lines.append(
+            f"  est. cost:    {totals['estimatedCostCC']} CC"
+            f"  (estimate at {totals['pricePerByteCC']} CC/byte, basis {totals['costBasis']})"
+        )
+
+    by_template = profile.get("byTemplate") or []
+    if by_template:
+        lines.append("")
+        lines.append("By template")
+        for row in by_template[:top]:
+            lines.append(
+                f"  {format_bytes(int(row['selfBytes'])):>10}  "
+                f"{row['nodes']:>3} node(s)  {row['template']}"
+            )
+
+    by_field = profile.get("byField") or []
+    if by_field:
+        lines.append("")
+        lines.append("Largest payload fields")
+        for row in by_field[:top]:
+            lines.append(
+                f"  {format_bytes(int(row['bytes'])):>10}  "
+                f"x{row['occurrences']:<3} {row['template']}.{row['field']}"
+            )
+
+    tree = profile.get("tree") or []
+    if tree:
+        lines.append("")
+        lines.append("Tree")
+        render_profile_tree(rebuild_profile_tree(tree), lines)
+
+    notes = profile.get("notes") or []
+    if notes:
+        lines.append("")
+        lines.append("Notes")
+        for note in notes:
+            lines.append(f"  - {note}")
+
+    lines.append("")
+    lines.append(
+        "Byte counts are a deterministic model of serialized size, not the "
+        "sequencer's metered count. Canton Coin figures are estimates at the "
+        "stated price."
+    )
+    return "\n".join(lines)
+
+
+def rebuild_profile_tree(rows: list[dict[str, Any]]) -> list[ProfileNode]:
+    """Rebuild nodes from a serialized profile so rendering works on both paths."""
+    out: list[ProfileNode] = []
+    for row in rows:
+        node = ProfileNode(
+            event_id=str(row.get("eventId", "")),
+            kind=str(row.get("kind", "")),
+            template=row.get("template"),
+            choice=row.get("choice"),
+            envelope_bytes=int(row.get("envelopeBytes", 0)),
+            payload_bytes=int(row.get("payloadBytes", 0)),
+            total_bytes=int(row.get("totalBytes", 0)),
+            fields=dict(row.get("fields") or {}),
+            children=rebuild_profile_tree(row.get("children") or []),
+        )
+        out.append(node)
+    return out
+
+
+def diff_profiles(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    def totals_of(profile: dict[str, Any]) -> dict[str, int]:
+        totals = profile.get("totals") or {}
+        return {
+            "nodes": int(totals.get("nodes", 0)),
+            "modeledBytes": int(totals.get("modeledBytes", 0)),
+            "envelopeBytes": int(totals.get("envelopeBytes", 0)),
+            "payloadBytes": int(totals.get("payloadBytes", 0)),
+        }
+
+    before_totals, after_totals = totals_of(before), totals_of(after)
+    delta = {key: after_totals[key] - before_totals[key] for key in after_totals}
+
+    def template_map(profile: dict[str, Any]) -> dict[str, int]:
+        return {row["template"]: int(row["selfBytes"]) for row in profile.get("byTemplate") or []}
+
+    before_templates, after_templates = template_map(before), template_map(after)
+    template_rows = []
+    for name in sorted(set(before_templates) | set(after_templates)):
+        old, new = before_templates.get(name, 0), after_templates.get(name, 0)
+        if old != new:
+            template_rows.append({"template": name, "beforeBytes": old, "afterBytes": new, "deltaBytes": new - old})
+    template_rows.sort(key=lambda row: -abs(row["deltaBytes"]))
+
+    return {
+        "schema": PROFILE_SCHEMA,
+        "kind": "cost-diff",
+        "before": before.get("subject"),
+        "after": after.get("subject"),
+        "totals": {"before": before_totals, "after": after_totals, "delta": delta},
+        "byTemplate": template_rows,
+    }
+
+
+def render_profile_diff(diff: dict[str, Any]) -> str:
+    totals = diff.get("totals") or {}
+    delta = totals.get("delta") or {}
+
+    def signed(count: int) -> str:
+        return f"+{count}" if count > 0 else str(count)
+
+    lines = [
+        "DPM cost diff",
+        f"  before:       {diff.get('before', '-')}",
+        f"  after:        {diff.get('after', '-')}",
+        f"  nodes:        {signed(int(delta.get('nodes', 0)))}",
+        f"  modeled:      {signed(int(delta.get('modeledBytes', 0)))} B",
+        f"  envelope:     {signed(int(delta.get('envelopeBytes', 0)))} B",
+        f"  payload:      {signed(int(delta.get('payloadBytes', 0)))} B",
+    ]
+    rows = diff.get("byTemplate") or []
+    if rows:
+        lines.append("")
+        lines.append("Changed templates")
+        for row in rows:
+            lines.append(f"  {signed(int(row['deltaBytes'])):>8} B  {row['template']}")
+    else:
+        lines.append("")
+        lines.append("No per-template change.")
+    return "\n".join(lines)
+
+
+def check_profile_budgets(profile: dict[str, Any], budgets: dict[str, Any]) -> list[dict[str, Any]]:
+    """Compare a profile against thresholds. Returns one finding per breach."""
+    findings: list[dict[str, Any]] = []
+    totals = profile.get("totals") or {}
+
+    max_total = budgets.get("maxTotalBytes")
+    if isinstance(max_total, (int, float)):
+        actual = int(totals.get("modeledBytes", 0))
+        if actual > max_total:
+            findings.append({
+                "budget": "maxTotalBytes",
+                "subject": profile.get("subject"),
+                "limit": int(max_total),
+                "actual": actual,
+                "message": f"transaction models {actual} B, over the {int(max_total)} B budget",
+            })
+
+    max_nodes = budgets.get("maxNodes")
+    if isinstance(max_nodes, (int, float)):
+        actual = int(totals.get("nodes", 0))
+        if actual > max_nodes:
+            findings.append({
+                "budget": "maxNodes",
+                "subject": profile.get("subject"),
+                "limit": int(max_nodes),
+                "actual": actual,
+                "message": f"transaction has {actual} nodes, over the {int(max_nodes)} node budget",
+            })
+
+    per_template = budgets.get("maxTemplateBytes") or {}
+    if isinstance(per_template, dict):
+        actuals = {row["template"]: int(row["selfBytes"]) for row in profile.get("byTemplate") or []}
+        for template in sorted(per_template):
+            limit = per_template[template]
+            if not isinstance(limit, (int, float)):
+                continue
+            actual = actuals.get(template, 0)
+            if actual > limit:
+                findings.append({
+                    "budget": "maxTemplateBytes",
+                    "subject": template,
+                    "limit": int(limit),
+                    "actual": actual,
+                    "message": f"{template} models {actual} B, over its {int(limit)} B budget",
+                })
+    return findings
+
+
+def load_profile_document(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a JSON object")
+    if data.get("schema") != PROFILE_SCHEMA:
+        raise ValueError(f"{path}: not a {PROFILE_SCHEMA} document")
+    return data
+
+
+def profile_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="dpm profile",
+        description="Profile what a Canton transaction costs in serialized bytes.",
+    )
+    sub = parser.add_subparsers(dest="profile_command")
+
+    tx = sub.add_parser("tx", help="Profile a transaction's size by node, template, and payload field.")
+    add_common_connection_args(tx)
+    tx.add_argument("update_id", nargs="?", help="Update id to fetch and profile.")
+    tx.add_argument("--prepared", help="Prepared artifact from `dpm trace prepare --export`.")
+    tx.add_argument("--trace", dest="trace_artifact", help="Exported trace artifact to profile offline.")
+    tx.add_argument("--price-per-byte", type=float, help="Canton Coin per byte, for an estimated cost.")
+    tx.add_argument("--export", help="Write the profile document as JSON.")
+    tx.add_argument("--json", action="store_true", help="Print the profile as JSON.")
+    tx.add_argument("--top", type=int, default=10, help="How many rows per table. Default 10.")
+
+    diff = sub.add_parser("diff", help="Compare two profile documents.")
+    diff.add_argument("before")
+    diff.add_argument("after")
+    diff.add_argument("--json", action="store_true", help="Print the diff as JSON.")
+
+    check = sub.add_parser("check", help="Fail when a profile exceeds its budgets.")
+    check.add_argument("profile", help="Profile document to check.")
+    check.add_argument("--budget", required=True, help="JSON file of budgets.")
+    check.add_argument("--json", action="store_true", help="Print findings as JSON.")
+
+    args = parser.parse_args(argv)
+    if not args.profile_command:
+        parser.print_help()
+        return PROFILE_EXIT_ERROR
+    try:
+        if args.profile_command == "tx":
+            return run_profile_tx(args)
+        if args.profile_command == "diff":
+            return run_profile_diff(args)
+        return run_profile_check(args)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return PROFILE_EXIT_ERROR
+
+
+def run_profile_tx(args: argparse.Namespace) -> int:
+    price = args.price_per_byte
+
+    if args.prepared:
+        artifact = json.loads(Path(args.prepared).read_text(encoding="utf-8"))
+        profile = profile_from_commands(artifact, price_per_byte=price)
+    elif args.trace_artifact:
+        artifact = load_trace_artifact(Path(args.trace_artifact))
+        profile = profile_from_trace(
+            trace_from_artifact(artifact),
+            price_per_byte=price,
+            measured=measured_wire_bytes(artifact),
+        )
+    elif args.update_id:
+        apply_config_defaults(args, load_config(args.config))
+        parties = parse_parties(args.read_as + args.party)
+        raw, source, url = load_update(args, args.update_id, parties)
+        profile = profile_from_trace(
+            normalize_trace(raw, source, url, parties),
+            price_per_byte=price,
+            notes=[
+                "Fetched as JSON, so no measured wire size is available. "
+                "Profile a prepared transaction for a ground-truth total."
+            ],
+        )
+    else:
+        print("error: give an update id, --prepared, or --trace", file=sys.stderr)
+        return PROFILE_EXIT_ERROR
+
+    if args.export:
+        Path(args.export).write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"wrote profile: {args.export}")
+    if args.json:
+        print(json.dumps(profile, indent=2, sort_keys=True))
+    elif not args.export:
+        print(render_profile(profile, top=args.top))
+    return PROFILE_EXIT_OK
+
+
+def run_profile_diff(args: argparse.Namespace) -> int:
+    diff = diff_profiles(
+        load_profile_document(Path(args.before)),
+        load_profile_document(Path(args.after)),
+    )
+    if args.json:
+        print(json.dumps(diff, indent=2, sort_keys=True))
+    else:
+        print(render_profile_diff(diff))
+    return PROFILE_EXIT_OK
+
+
+def run_profile_check(args: argparse.Namespace) -> int:
+    profile = load_profile_document(Path(args.profile))
+    budgets = json.loads(Path(args.budget).read_text(encoding="utf-8"))
+    if not isinstance(budgets, dict):
+        raise ValueError(f"{args.budget}: expected a JSON object of budgets")
+    findings = check_profile_budgets(profile, budgets)
+    if args.json:
+        print(json.dumps({"schema": PROFILE_SCHEMA, "kind": "budget-check",
+                          "subject": profile.get("subject"), "findings": findings},
+                         indent=2, sort_keys=True))
+    elif findings:
+        print(f"budget check failed: {len(findings)} breach(es)")
+        for finding in findings:
+            print(f"  {finding['budget']}: {finding['message']}")
+    else:
+        print("budget check passed")
+    return PROFILE_EXIT_BUDGET if findings else PROFILE_EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # The DPM plugin invokes us without the "trace" command name; accept an
@@ -135,6 +776,8 @@ def main(argv: list[str] | None = None) -> int:
         argv = argv[1:]
     # Handled after the leading-"trace" strip so both `dpm trace debug ...`
     # and a top-level `dpm debug` (via bin/dpm-debug) reach the same entry.
+    if argv and argv[0] == "profile":
+        return profile_main(argv[1:])
     if argv and argv[0] == "debug-info":
         return debug_info_main(argv[1:])
     if argv and argv[0] == "debug":

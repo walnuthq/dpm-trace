@@ -1,0 +1,141 @@
+{
+  "createdAt": "2026-08-31T09:00:00Z",
+  "kind": "committed-update",
+  "packages": {},
+  "participant": {
+    "ledgerUrl": "<participant-ledger-url>",
+    "readAs": [
+      "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17"
+    ],
+    "scanUrl": null
+  },
+  "privacy": {
+    "missingPrivateDataPolicy": "private data outside this participant projection is not present in the artifact",
+    "readAs": [
+      "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17"
+    ],
+    "scope": "participant-scoped projection"
+  },
+  "schema": "dpm-trace/trace-artifact/v0",
+  "trace": {
+    "eventsById": {
+      "#1:0": {
+        "actingParties": [
+          "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17"
+        ],
+        "argument": {
+          "newOwner": "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e",
+          "transferNote": "quarterly rebalance"
+        },
+        "childEventIds": [
+          "#1:1",
+          "#1:2"
+        ],
+        "choice": "Transfer",
+        "consuming": true,
+        "contractId": "00a7f31c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+        "eventId": "#1:0",
+        "kind": "exercise",
+        "observers": [
+          "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e"
+        ],
+        "payload": null,
+        "result": null,
+        "signatories": [
+          "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7"
+        ],
+        "template": "7f3c1e9a4b2d8065f1a3c7e05d9b284617ca3f0e8d5b1927a604c3e8f172b9da:Asset:Asset",
+        "witnesses": [
+          "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17",
+          "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e",
+          "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7"
+        ]
+      },
+      "#1:1": {
+        "actingParties": [],
+        "argument": null,
+        "childEventIds": [],
+        "choice": null,
+        "consuming": null,
+        "contractId": "00b4e82d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
+        "eventId": "#1:1",
+        "kind": "create",
+        "observers": [
+          "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17",
+          "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e"
+        ],
+        "payload": {
+          "issuer": "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7",
+          "metadata": {
+            "isin": "US0378331005",
+            "settlementNote": "xxxxxxxxxxxxxxxxxxxxxxxx",
+            "tags": [
+              "collateral",
+              "tier1",
+              "eligible"
+            ]
+          },
+          "observers": [
+            "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7",
+            "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17",
+            "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e"
+          ],
+          "owner": "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e",
+          "quantity": "1500.0000000000",
+          "symbol": "USD"
+        },
+        "result": null,
+        "signatories": [
+          "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7"
+        ],
+        "template": "7f3c1e9a4b2d8065f1a3c7e05d9b284617ca3f0e8d5b1927a604c3e8f172b9da:Asset:Asset",
+        "witnesses": [
+          "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17",
+          "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e",
+          "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7"
+        ]
+      },
+      "#1:2": {
+        "actingParties": [
+          "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7"
+        ],
+        "argument": {
+          "amount": "1500.0000000000",
+          "from": "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17",
+          "to": "Bob::1220b7e2d4a09c5f38617ea4b2c0d9f5837a1c46e0b9d23f8051e7a6c4d290b3e"
+        },
+        "childEventIds": [],
+        "choice": "Record",
+        "consuming": false,
+        "contractId": "00c9d13e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
+        "eventId": "#1:2",
+        "kind": "exercise",
+        "observers": [],
+        "payload": null,
+        "result": null,
+        "signatories": [
+          "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7"
+        ],
+        "template": "7f3c1e9a4b2d8065f1a3c7e05d9b284617ca3f0e8d5b1927a604c3e8f172b9da:Asset:TransferLog",
+        "witnesses": [
+          "Registry::1220c4a81f60e37d95b2084fa6c1e5397d0b82a4f6c31e957024d8b6a0f3e21c7"
+        ]
+      }
+    },
+    "offset": "42",
+    "projection": {
+      "note": "participant-scoped projection",
+      "readAs": [
+        "Alice::12209a4f8c1e7b2d5063a8f4c9e17b05d2364fa8c0e59b3712d4680fa3c95e17"
+      ]
+    },
+    "recordTime": "2026-08-31T09:00:00Z",
+    "rootEventIds": [
+      "#1:0"
+    ],
+    "source": "ledger-json-api",
+    "sourceUrl": "<participant-ledger-url>/v2/updates/update-by-id",
+    "synchronizerId": "sync::1220ab",
+    "updateId": "update-000000000001"
+  }
+}

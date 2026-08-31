@@ -1,0 +1,30 @@
+# Stdout-only checks here: the export/diff/budget round-trip needs scratch
+# files, and check-profile.py drives that in a tempdir so the suite does not
+# depend on a writable lit output directory.
+
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile tx --trace %root/tests/fixtures/profile/transfer-before.trace-artifact.json --price-per-byte 0.0000001 | FileCheck %s
+
+# CHECK: DPM cost profile
+# CHECK: subject:      update-000000000001
+# CHECK: nodes:        3
+# CHECK: modeled:
+# CHECK: est. cost:
+# CHECK-SAME: (estimate at
+# CHECK: By template
+# CHECK: Asset:Asset
+# CHECK: Largest payload fields
+# CHECK: Tree
+# CHECK: exercise
+# CHECK-SAME: Transfer
+# CHECK: create
+# CHECK: Byte counts are a deterministic model
+
+# A committed update fetched as JSON carries no wire size, so the profile must
+# not claim a measured one.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile tx --trace %root/tests/fixtures/profile/transfer-before.trace-artifact.json --json | FileCheck --check-prefix=JSON %s
+
+# JSON: "schema": "dpm-profile/v1"
+# JSON-NOT: measuredWireBytes
+
+# Exit codes, sizing invariants, the diff, and the budget gate.
+# RUN: env PYTHONPATH=%root/src %python %root/tests/check-profile.py

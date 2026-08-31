@@ -18,6 +18,13 @@ Command surface:
 - `dpm trace compare`: compare prepared transactions, successful transactions, or completion data.
 - `dpm trace test`: run Daml Script unit tests (unit mode) or an lit suite against a managed local Canton (`--integration`).
 - `dpm trace debug` (also `dpm debug` via `bin/dpm-debug`): source-level debugging for Daml Script runs from a JSONL runtime debug trace plus `daml-debug-info/v1` metadata (`--interactive` for the REPL).
+- `dpm profile tx`: profile what a transaction costs in serialized bytes, broken down by
+  node, template, and payload field. Input is an update id, `--prepared` (a prepared
+  artifact), or `--trace` (an exported trace artifact). `--price-per-byte` adds a Canton
+  Coin estimate, `--json`/`--export` give machine-readable output.
+- `dpm profile diff <before> <after>`: compare two profile documents.
+- `dpm profile check <profile> --budget <file>`: fail when a profile exceeds its budgets.
+  Exit 0 when it fits, 2 on a breach, 1 on a tool error, so CI can tell them apart.
 - `dpm debug-info verify <dar-or-json>`: check a `daml-debug-info/v1` artifact against the
   specification (structure, internal consistency, and agreement with the DAR and sources).
   `--source-root` enables the source checks, `--json` gives CI-readable output, `--strict`
@@ -39,6 +46,10 @@ Key areas to orient in the file:
 - Transaction model + normalization: `NormalizedTrace`, `TraceEvent`, `normalize_trace`, `load_update`.
 - Pretty + interactive rendering: `print_pretty_trace`, `Stepper` (the `--visualize` REPL).
 - Failed submissions / completions: `fetch_completion_by_command_id`, `normalize_completion`, `print_completion_trace`.
+- Cost profiling (`dpm profile`): `canonical_bytes` / `field_sizes` (the sizing model),
+  `ProfileNode` + `profile_event` (the per-node tree), `rollup_by_template` /
+  `rollup_by_field`, `measured_wire_bytes` (ground truth when a prepared transaction is
+  present), `diff_profiles`, `check_profile_budgets`, `profile_main`.
 - Source mapping: `SourceIndex` (loads `daml.yaml` sources and, with `--dar`, `damlc inspect`), `completion_source_needles`, `render_source_diagnostic`.
 - Test runner (`dpm trace test`): `test_main` → `run_test` → `daml_test_command`, `parse_junit`, `transaction_html_to_text`, `transaction_stats`, `test_failure_locations`, `print_test_report` / `test_report_json`.
 - Integration runner (`--integration`): `run_integration_tests` boots a local Canton (`canton_config_text`, `canton_bootstrap_text`, `find_free_ports`, `wait_for_parties`, `build_dar`), exports `DPM_TRACE_IT_*` env, runs `lit`, tears down. `--parties Name@N` (`parse_party_placements`) provisions N participants; tests reach participant K via `%ledger{K}` and tolerate ingestion lag with `dpm trace --wait`.
@@ -54,6 +65,10 @@ CI workflow + regression demo) lives in the sibling `daml-tests` directory.
 - Keep examples generic. Do not commit local machine paths, usernames, hostnames, or personal temp paths. Use placeholders such as `<path-to-daml-project>`, `<path-to-canton.jar>`, `<package-dir>`, and `<party-id>`.
 - Do not commit `.venv/`, `.dpm-home/`, `.dpm-trace.json`, `tests/.lit/`, or generated caches.
 - Stdlib only. The tool must run on a clean Python 3.10+ with no pip installs; do not add third-party runtime imports.
+- Profile byte counts are a deterministic model of serialized size, not the sequencer's
+  metered count. Report a measured wire size only when the artifact carries one (a
+  prepared transaction does; a JSON-fetched update does not), keep the two apart in the
+  output, and label every Canton Coin figure as an estimate at a stated price.
 - Keep the tool participant-scoped in wording and behavior. Do not describe output as a global Canton transaction.
 - Failed submissions may not have an update id. Use completion/error data for those workflows.
 - Source diagnostics should prefer `damlc inspect` plus local project/source metadata when available, with local source matching only as a fallback.
