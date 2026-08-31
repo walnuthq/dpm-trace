@@ -309,6 +309,33 @@ def measured_wire_bytes(artifact: dict[str, Any]) -> dict[str, Any] | None:
     return {"source": "preparedTransaction", "bytes": len(raw)}
 
 
+def canton_cost_estimate(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    """Canton's own traffic cost estimate, when PrepareSubmission returned one.
+
+    The participant is the authority on what a submission will cost. When it
+    tells us, report that and say where it came from, rather than presenting
+    our own byte model as the answer. It reads zero on a node with no traffic
+    pricing configured, which is still worth showing: zero from the
+    participant is a different statement from no estimate at all.
+    """
+    response = artifact.get("response")
+    if not isinstance(response, dict):
+        return None
+    estimate = response.get("costEstimation")
+    if not isinstance(estimate, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in (
+        "totalTrafficCostEstimation",
+        "confirmationRequestTrafficCostEstimation",
+        "confirmationResponseTrafficCostEstimation",
+        "estimationTimestamp",
+    ):
+        if key in estimate:
+            out[key] = estimate[key]
+    return out or None
+
+
 def build_profile(
     *,
     subject: str,
@@ -317,6 +344,7 @@ def build_profile(
     price_per_byte: float | None,
     measured: dict[str, Any] | None,
     notes: list[str],
+    canton_estimate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     all_nodes = list(walk_profile(roots))
     modeled = sum(node.self_bytes for node in all_nodes)
@@ -329,6 +357,11 @@ def build_profile(
     if measured:
         totals["measuredWireBytes"] = measured["bytes"]
         totals["measuredWireSource"] = measured["source"]
+        # What the model could not attribute to a field is protocol framing.
+        # Naming it keeps the breakdown honest about its own coverage.
+        totals["unattributedBytes"] = max(0, measured["bytes"] - modeled)
+    if canton_estimate:
+        totals["cantonCostEstimation"] = canton_estimate
     if price_per_byte is not None:
         basis = measured["bytes"] if measured else modeled
         totals["estimatedCostCC"] = round(basis * price_per_byte, 9)
@@ -431,6 +464,7 @@ def profile_from_commands(
         price_per_byte=price_per_byte,
         measured=measured_wire_bytes(artifact),
         notes=notes,
+        canton_estimate=canton_cost_estimate(artifact),
     )
 
 
@@ -486,6 +520,16 @@ def render_profile(profile: dict[str, Any], *, top: int = 10, full_ids: bool = F
         lines.append(
             f"  measured:     {format_bytes(int(totals['measuredWireBytes']))}"
             f"  (from {totals.get('measuredWireSource')})"
+        )
+        lines.append(
+            f"  unattributed: {format_bytes(int(totals.get('unattributedBytes', 0)))}"
+            f"  (protocol framing, not attributable to a field)"
+        )
+    estimate = totals.get("cantonCostEstimation")
+    if isinstance(estimate, dict):
+        lines.append(
+            f"  Canton says:  {estimate.get('totalTrafficCostEstimation')}"
+            f"  (totalTrafficCostEstimation, from the participant)"
         )
     if "estimatedCostCC" in totals:
         lines.append(
