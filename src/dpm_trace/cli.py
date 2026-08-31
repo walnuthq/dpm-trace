@@ -434,6 +434,21 @@ def profile_from_commands(
     )
 
 
+def display_template(template: str | None, full_ids: bool) -> str:
+    """Template label for a report a person reads.
+
+    A package id is 64 hex characters and the same on every row, so it buys
+    nothing in a size table. Keep `Module:Template`, and offer --full-ids for
+    the case that actually needs disambiguating: two versions of a package in
+    one transaction.
+    """
+    if not template:
+        return "(no template)"
+    if full_ids:
+        return template
+    return short_template(template) or template
+
+
 def format_bytes(count: int) -> str:
     if count < 1024:
         return f"{count} B"
@@ -442,19 +457,21 @@ def format_bytes(count: int) -> str:
     return f"{count / (1024 * 1024):.1f} MiB"
 
 
-def render_profile_tree(nodes: list[ProfileNode], lines: list[str], depth: int = 0) -> None:
+def render_profile_tree(
+    nodes: list[ProfileNode], lines: list[str], depth: int = 0, full_ids: bool = False
+) -> None:
     for node in nodes:
-        label = node.template or "(no template)"
+        label = display_template(node.template, full_ids)
         if node.choice:
             label = f"{label} :: {node.choice}"
         lines.append(
             f"  {'  ' * depth}{node.kind:<9} {label}  "
             f"self {format_bytes(node.self_bytes)}  subtree {format_bytes(node.total_bytes)}"
         )
-        render_profile_tree(node.children, lines, depth + 1)
+        render_profile_tree(node.children, lines, depth + 1, full_ids)
 
 
-def render_profile(profile: dict[str, Any], *, top: int = 10) -> str:
+def render_profile(profile: dict[str, Any], *, top: int = 10, full_ids: bool = False) -> str:
     totals = profile.get("totals") or {}
     lines = [
         "DPM cost profile",
@@ -483,7 +500,7 @@ def render_profile(profile: dict[str, Any], *, top: int = 10) -> str:
         for row in by_template[:top]:
             lines.append(
                 f"  {format_bytes(int(row['selfBytes'])):>10}  "
-                f"{row['nodes']:>3} node(s)  {row['template']}"
+                f"{row['nodes']:>3} node(s)  {display_template(row['template'], full_ids)}"
             )
 
     by_field = profile.get("byField") or []
@@ -493,14 +510,15 @@ def render_profile(profile: dict[str, Any], *, top: int = 10) -> str:
         for row in by_field[:top]:
             lines.append(
                 f"  {format_bytes(int(row['bytes'])):>10}  "
-                f"x{row['occurrences']:<3} {row['template']}.{row['field']}"
+                f"x{row['occurrences']:<3} "
+                f"{display_template(row['template'], full_ids)}.{row['field']}"
             )
 
     tree = profile.get("tree") or []
     if tree:
         lines.append("")
         lines.append("Tree")
-        render_profile_tree(rebuild_profile_tree(tree), lines)
+        render_profile_tree(rebuild_profile_tree(tree), lines, full_ids=full_ids)
 
     notes = profile.get("notes") or []
     if notes:
@@ -571,7 +589,7 @@ def diff_profiles(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
     }
 
 
-def render_profile_diff(diff: dict[str, Any]) -> str:
+def render_profile_diff(diff: dict[str, Any], *, full_ids: bool = False) -> str:
     totals = diff.get("totals") or {}
     delta = totals.get("delta") or {}
 
@@ -592,7 +610,10 @@ def render_profile_diff(diff: dict[str, Any]) -> str:
         lines.append("")
         lines.append("Changed templates")
         for row in rows:
-            lines.append(f"  {signed(int(row['deltaBytes'])):>8} B  {row['template']}")
+            lines.append(
+                f"  {signed(int(row['deltaBytes'])):>8} B  "
+                f"{display_template(row['template'], full_ids)}"
+            )
     else:
         lines.append("")
         lines.append("No per-template change.")
@@ -672,11 +693,13 @@ def profile_main(argv: list[str]) -> int:
     tx.add_argument("--export", help="Write the profile document as JSON.")
     tx.add_argument("--json", action="store_true", help="Print the profile as JSON.")
     tx.add_argument("--top", type=int, default=10, help="How many rows per table. Default 10.")
+    tx.add_argument("--full-ids", action="store_true", help="Show full package ids instead of Module:Template.")
 
     diff = sub.add_parser("diff", help="Compare two profile documents.")
     diff.add_argument("before")
     diff.add_argument("after")
     diff.add_argument("--json", action="store_true", help="Print the diff as JSON.")
+    diff.add_argument("--full-ids", action="store_true", help="Show full package ids instead of Module:Template.")
 
     check = sub.add_parser("check", help="Fail when a profile exceeds its budgets.")
     check.add_argument("profile", help="Profile document to check.")
@@ -733,7 +756,7 @@ def run_profile_tx(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(profile, indent=2, sort_keys=True))
     elif not args.export:
-        print(render_profile(profile, top=args.top))
+        print(render_profile(profile, top=args.top, full_ids=args.full_ids))
     return PROFILE_EXIT_OK
 
 
@@ -745,7 +768,7 @@ def run_profile_diff(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(diff, indent=2, sort_keys=True))
     else:
-        print(render_profile_diff(diff))
+        print(render_profile_diff(diff, full_ids=args.full_ids))
     return PROFILE_EXIT_OK
 
 
