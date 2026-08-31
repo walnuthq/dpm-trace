@@ -23,6 +23,10 @@ Command surface:
   line each entry is written at when `daml-debug-info/v1` metadata is supplied. Input is an update id, `--prepared` (a prepared
   artifact), or `--trace` (an exported trace artifact). `--price-per-byte` adds a Canton
   Coin estimate, `--json`/`--export` give machine-readable output.
+- `dpm profile run <trace.jsonl>`: execution counts per source location from a Daml
+  Script runtime debug trace. Counts how often a line ran, not how long: the SDK
+  interpretation profiler lives behind `participants.<name>.features.profile-dir`, which
+  Canton rejects outside the Enterprise edition, and the trace carries no timestamps.
 - `dpm profile diff <before> <after>`: compare two profile documents.
 - `dpm profile check <profile> --budget <file>`: fail when a profile exceeds its budgets.
   Exit 0 when it fits, 2 on a breach, 1 on a tool error, so CI can tell them apart.

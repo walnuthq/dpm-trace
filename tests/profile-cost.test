@@ -47,3 +47,33 @@
 
 # Exit codes, sizing invariants, the diff, and the budget gate.
 # RUN: env PYTHONPATH=%root/src %python %root/tests/check-profile.py
+
+# `dpm profile run` reports execution counts per source location from a Daml
+# Script runtime trace. It counts how often a line ran, not how long it took,
+# and says so: the SDK interpretation profiler is gated behind Canton
+# Enterprise and the trace carries no timestamps.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile run %root/tests/fixtures/debug-info-v1/run.debug-trace.jsonl --debug-info %root/tests/fixtures/debug-info-v1/asset.debug-info.json --source-root %root/tests/fixtures/debug-info-v1 | FileCheck --check-prefix=EXEC %s
+
+# EXEC-LABEL: DPM execution profile
+# EXEC: measure:      executions per source location
+# EXEC: steps:        9
+# EXEC-SAME: 7 located
+# EXEC: Hot spots
+# EXEC: 2x
+# EXEC-SAME: Asset.daml:9
+# EXEC-SAME: created x2
+# EXEC: Asset.daml:18:5
+# EXEC-SAME: Asset:Asset.Transfer
+# EXEC-SAME: exercised x1
+# EXEC: Note: Counts executions per source location, not elapsed time.
+
+# The runtime trace carries its own coordinates for script steps, so some
+# locations resolve without metadata. What daml-debug-info/v1 adds is the
+# template creates and choice exercises the trace cannot place on its own:
+# 4 located steps become 7.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile run %root/tests/fixtures/debug-info-v1/run.debug-trace.jsonl | FileCheck --check-prefix=EXECBARE %s
+
+# EXECBARE-LABEL: DPM execution profile
+# EXECBARE: steps:        9
+# EXECBARE-SAME: 4 located
+# EXECBARE-NOT: Asset:Asset.Transfer

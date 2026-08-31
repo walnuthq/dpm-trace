@@ -528,6 +528,21 @@ def profile_from_commands(
     )
 
 
+def display_source_path(path: str) -> str:
+    """Shorten a source path for a report someone will paste somewhere.
+
+    Locations resolve through several routes, so some arrive absolute. A
+    profile is meant to be shared in a review, and an absolute path leaks the
+    author's home directory while telling the reader nothing.
+    """
+    if not path:
+        return path
+    try:
+        return str(Path(path).resolve().relative_to(Path.cwd().resolve()))
+    except (ValueError, OSError):
+        return path
+
+
 def display_template(template: str | None, full_ids: bool) -> str:
     """Template label for a report a person reads.
 
@@ -605,7 +620,7 @@ def render_profile(profile: dict[str, Any], *, top: int = 10, full_ids: bool = F
             label = display_template(row["template"], full_ids)
             if row.get("choice"):
                 label = f"{label} :: {row['choice']}"
-            where = row.get("source") or "(source not resolved)"
+            where = display_source_path(row.get("source") or "") or "(source not resolved)"
             lines.append(f"  {format_bytes(int(row['selfBytes'])):>10}  {label}  {where}")
 
     by_template = profile.get("byTemplate") or []
@@ -803,6 +818,90 @@ def load_profile_document(path: Path) -> dict[str, Any]:
     return data
 
 
+def profile_run_document(
+    steps: list[DebugStep], *, subject: str, source: str
+) -> dict[str, Any]:
+    """Execution frequency per source location, from a runtime debug trace.
+
+    This counts how often each line ran, not how long it took. The Daml
+    interpretation profiler that would give elapsed time lives behind
+    `participants.<name>.features.profile-dir`, which Canton rejects outside
+    the Enterprise edition, and the runtime trace carries no timestamps yet.
+    Counts are what the recorded data actually supports, so counts are what
+    this reports, under a name that does not imply otherwise.
+    """
+    by_location: dict[str, dict[str, Any]] = {}
+    by_kind: dict[str, int] = {}
+    for step in steps:
+        by_kind[step.kind] = by_kind.get(step.kind, 0) + 1
+        if step.location is None:
+            continue
+        key = format_source_path(step.location)
+        row = by_location.setdefault(key, {
+            "source": key,
+            "label": step.location.label,
+            "executions": 0,
+            "kinds": {},
+        })
+        row["executions"] += 1
+        row["kinds"][step.kind] = row["kinds"].get(step.kind, 0) + 1
+
+    rows = sorted(by_location.values(), key=lambda r: (-r["executions"], r["source"]))
+    located = sum(row["executions"] for row in rows)
+    return {
+        "schema": PROFILE_SCHEMA,
+        "kind": "execution-profile",
+        "measure": "executions",
+        "subject": subject,
+        "origin": source,
+        "totals": {
+            "steps": len(steps),
+            "locatedSteps": located,
+            "unlocatedSteps": len(steps) - located,
+            "byKind": by_kind,
+        },
+        "hotSpots": rows,
+        "notes": [
+            "Counts executions per source location, not elapsed time. The SDK "
+            "interpretation profiler needs Canton Enterprise, and the runtime "
+            "trace carries no timestamps.",
+        ],
+    }
+
+
+def render_profile_run(profile: dict[str, Any], *, top: int = 10) -> str:
+    totals = profile.get("totals") or {}
+    lines = [
+        "DPM execution profile",
+        f"  subject:      {profile.get('subject', '-')}",
+        f"  measure:      executions per source location",
+        f"  steps:        {totals.get('steps', 0)}"
+        f"  ({totals.get('locatedSteps', 0)} located,"
+        f" {totals.get('unlocatedSteps', 0)} without a source location)",
+    ]
+    spots = profile.get("hotSpots") or []
+    if spots:
+        lines.append("")
+        lines.append("Hot spots")
+        for row in spots[:top]:
+            kinds = ", ".join(f"{k} x{v}" for k, v in sorted(row["kinds"].items()))
+            label = row.get("label") or ""
+            lines.append(
+                f"  {row['executions']:>4}x  {display_source_path(row['source'])}"
+                f"  {label}  ({kinds})"
+            )
+    else:
+        lines.append("")
+        lines.append(
+            "No located steps: pass --debug-info so trace locations resolve to "
+            "a file and line."
+        )
+    for note in profile.get("notes") or []:
+        lines.append("")
+        lines.append(f"Note: {note}")
+    return "\n".join(lines)
+
+
 def profile_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="dpm profile",
@@ -827,6 +926,17 @@ def profile_main(argv: list[str]) -> int:
     diff.add_argument("--json", action="store_true", help="Print the diff as JSON.")
     diff.add_argument("--full-ids", action="store_true", help="Show full package ids instead of Module:Template.")
 
+    run = sub.add_parser("run", help="Profile a Daml Script run: how often each source location executed.")
+    run.add_argument("trace", help="JSONL runtime debug trace from `daml script --debug-trace-file`.")
+    run.add_argument("--debug-info", action="append", default=[], help="daml-debug-info/v1 file. Repeatable.")
+    run.add_argument("--source-root", action="append", default=[], help="Source root. Repeatable.")
+    run.add_argument("--dar", action="append", default=[], help="DAR for package metadata. Repeatable.")
+    run.add_argument("--daml-yaml", action="append", default=[], help="daml.yaml. Repeatable.")
+    run.add_argument("--damlc", help="damlc/daml executable.")
+    run.add_argument("--export", help="Write the profile document as JSON.")
+    run.add_argument("--json", action="store_true", help="Print the profile as JSON.")
+    run.add_argument("--top", type=int, default=10, help="How many rows. Default 10.")
+
     check = sub.add_parser("check", help="Fail when a profile exceeds its budgets.")
     check.add_argument("profile", help="Profile document to check.")
     check.add_argument("--budget", required=True, help="JSON file of budgets.")
@@ -839,6 +949,8 @@ def profile_main(argv: list[str]) -> int:
     try:
         if args.profile_command == "tx":
             return run_profile_tx(args)
+        if args.profile_command == "run":
+            return run_profile_run(args)
         if args.profile_command == "diff":
             return run_profile_diff(args)
         return run_profile_check(args)
@@ -888,6 +1000,29 @@ def run_profile_tx(args: argparse.Namespace) -> int:
         print(json.dumps(profile, indent=2, sort_keys=True))
     elif not args.export:
         print(render_profile(profile, top=args.top, full_ids=args.full_ids))
+    return PROFILE_EXIT_OK
+
+
+def run_profile_run(args: argparse.Namespace) -> int:
+    index = source_index_from_args(args)
+    events, junk = load_debug_trace_events(Path(args.trace))
+    steps = normalize_debug_steps(events, index)
+    profile = profile_run_document(
+        steps, subject=Path(args.trace).name, source="daml-script-debug-trace"
+    )
+    if junk:
+        profile.setdefault("notes", []).append(
+            f"{junk} line(s) in the trace were not valid JSON objects and were skipped."
+        )
+    if args.export:
+        Path(args.export).write_text(
+            json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(f"wrote profile: {args.export}")
+    if args.json:
+        print(json.dumps(profile, indent=2, sort_keys=True))
+    elif not args.export:
+        print(render_profile_run(profile, top=args.top))
     return PROFILE_EXIT_OK
 
 
