@@ -211,12 +211,16 @@ def profile_event(trace: NormalizedTrace, event_id: str, seen: set[str]) -> Prof
         return None
 
     # The envelope is what the node costs before any application data: which
-    # template, which contract, which choice, and who is on it.
+    # template, which contract, which choice, and who is on it. Count each
+    # party once: witnesses is the union of the signatory, observer and acting
+    # sets, so charging every list separately bills the same id two or three
+    # times.
     envelope = 0
     for value in (ev.template, ev.contract_id, ev.choice):
         envelope += canonical_bytes(value)
-    for parties in (ev.signatories, ev.observers, ev.acting_parties, ev.witnesses):
-        envelope += canonical_bytes(parties)
+    parties = sorted(set(ev.signatories) | set(ev.observers)
+                     | set(ev.acting_parties) | set(ev.witnesses))
+    envelope += canonical_bytes(parties)
 
     payload = event_payload(ev)
     node = ProfileNode(
@@ -278,18 +282,19 @@ def annotate_profile_sources(
             if loc is None:
                 continue
             key = f"{node.template}.{choice}" if choice else node.template
-            found[key] = format_source_path(loc)
+            found[key] = display_source_path(format_source_path(loc))
             break
     return found
 
 
-def hot_spots(
-    nodes: list[ProfileNode], sources: dict[str, str], limit: int = 5
-) -> list[dict[str, Any]]:
+def hot_spots(nodes: list[ProfileNode], sources: dict[str, str]) -> list[dict[str, Any]]:
     """Rank what costs the most, keyed to where it is written.
 
     The size tables answer "how big"; this answers "where do I go first",
-    which is the question a developer actually arrives with.
+    which is the question a developer actually arrives with. Every entry is
+    returned: the document is what CI and other tools read, so truncation
+    belongs in the renderer, where the reader can see a row count, not in the
+    data, where a dropped row is indistinguishable from an absent one.
     """
     acc: dict[tuple[str, str | None], int] = {}
     for node in walk_profile(nodes):
@@ -307,7 +312,7 @@ def hot_spots(
             "source": sources.get(label) or sources.get(template),
         })
     rows.sort(key=lambda row: (-row["selfBytes"], row["template"]))
-    return rows[:limit]
+    return rows
 
 
 def rollup_by_template(nodes: list[ProfileNode]) -> list[dict[str, Any]]:
@@ -483,19 +488,29 @@ def profile_from_commands(
             continue
         inner = command
         kind = "command"
-        for key in ("CreateCommand", "createCommand", "ExerciseCommand", "exerciseCommand"):
+        # Longest names first: CreateAndExerciseCommand also contains "Create".
+        for key, node_kind in (
+            ("CreateAndExerciseCommand", "create-and-exercise"),
+            ("createAndExerciseCommand", "create-and-exercise"),
+            ("ExerciseByKeyCommand", "exercise-by-key"),
+            ("exerciseByKeyCommand", "exercise-by-key"),
+            ("CreateCommand", "create"),
+            ("createCommand", "create"),
+            ("ExerciseCommand", "exercise"),
+            ("exerciseCommand", "exercise"),
+        ):
             if isinstance(command.get(key), dict):
                 inner = command[key]
-                kind = "create" if "reate" in key else "exercise"
+                kind = node_kind
                 break
         template = inner.get("templateId") or inner.get("template_id")
         choice = inner.get("choice")
-        payload = (
-            inner.get("createArguments")
-            or inner.get("create_arguments")
-            or inner.get("choiceArgument")
-            or inner.get("choice_argument")
-        )
+        created = inner.get("createArguments") or inner.get("create_arguments")
+        argument = inner.get("choiceArgument") or inner.get("choice_argument")
+        if created is not None and argument is not None:
+            payload: Any = {"createArguments": created, "choiceArgument": argument}
+        else:
+            payload = created if created is not None else argument
         envelope = canonical_bytes(template) + canonical_bytes(choice)
         envelope += canonical_bytes(inner.get("contractId") or inner.get("contract_id"))
         node = ProfileNode(
@@ -615,12 +630,16 @@ def render_profile(profile: dict[str, Any], *, top: int = 10, full_ids: bool = F
     spots = profile.get("hotSpots") or []
     if spots and any(row.get("source") for row in spots):
         lines.append("")
-        lines.append("Hot spots")
-        for row in spots:
+        shown = spots[:top]
+        header = "Hot spots"
+        if len(spots) > len(shown):
+            header += f"  (top {len(shown)} of {len(spots)})"
+        lines.append(header)
+        for row in shown:
             label = display_template(row["template"], full_ids)
             if row.get("choice"):
                 label = f"{label} :: {row['choice']}"
-            where = display_source_path(row.get("source") or "") or "(source not resolved)"
+            where = row.get("source") or "(source not resolved)"
             lines.append(f"  {format_bytes(int(row['selfBytes'])):>10}  {label}  {where}")
 
     by_template = profile.get("byTemplate") or []
@@ -836,7 +855,7 @@ def profile_run_document(
         by_kind[step.kind] = by_kind.get(step.kind, 0) + 1
         if step.location is None:
             continue
-        key = format_source_path(step.location)
+        key = display_source_path(format_source_path(step.location))
         row = by_location.setdefault(key, {
             "source": key,
             "label": step.location.label,
@@ -882,13 +901,16 @@ def render_profile_run(profile: dict[str, Any], *, top: int = 10) -> str:
     spots = profile.get("hotSpots") or []
     if spots:
         lines.append("")
-        lines.append("Hot spots")
-        for row in spots[:top]:
+        shown = spots[:top]
+        header = "Hot spots"
+        if len(spots) > len(shown):
+            header += f"  (top {len(shown)} of {len(spots)})"
+        lines.append(header)
+        for row in shown:
             kinds = ", ".join(f"{k} x{v}" for k, v in sorted(row["kinds"].items()))
             label = row.get("label") or ""
             lines.append(
-                f"  {row['executions']:>4}x  {display_source_path(row['source'])}"
-                f"  {label}  ({kinds})"
+                f"  {row['executions']:>4}x  {row['source']}  {label}  ({kinds})"
             )
     else:
         lines.append("")

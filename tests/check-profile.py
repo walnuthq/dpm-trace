@@ -20,6 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dpm_trace.cli import (  # noqa: E402
+    NormalizedTrace,
+    ProfileNode,
+    TraceEvent,
+    profile_event,
+    profile_from_commands,
     PROFILE_EXIT_BUDGET,
     PROFILE_EXIT_ERROR,
     PROFILE_EXIT_OK,
@@ -27,6 +32,7 @@ from dpm_trace.cli import (  # noqa: E402
     check_profile_budgets,
     diff_profiles,
     field_sizes,
+    hot_spots,
     main,
     measured_wire_bytes,
     walk_profile,
@@ -127,6 +133,40 @@ def run_checks(tmp: Path) -> int:
     check("a tool error exits 1, not 2", code == PROFILE_EXIT_ERROR, f"exit {code}")
     code = main(["profile", "tx"])
     check("no input exits 1", code == PROFILE_EXIT_ERROR, f"exit {code}")
+
+    # --- regressions found in review -------------------------------------
+    # A party named in both witnesses and signatories was charged twice.
+    party = "Alice::1220" + "ab" * 32
+    ev = TraceEvent(event_id="e", kind="create", template="pkg:M:T",
+                    signatories=[party], observers=[party],
+                    acting_parties=[party], witnesses=[party])
+    tr = NormalizedTrace(update_id="u", source="s", source_url=None, projection={},
+                         root_event_ids=["e"], events_by_id={"e": ev})
+    node = profile_event(tr, "e", set())
+    once = canonical_bytes([party])
+    check("a party on several lists is charged once",
+          node.envelope_bytes < once * 2,
+          f"envelope {node.envelope_bytes} vs one list {once}")
+
+    # CreateAndExerciseCommand matched no branch and was dropped entirely.
+    cae = profile_from_commands({"request": {"commandId": "c", "commands": [
+        {"CreateAndExerciseCommand": {"templateId": "#p:M:T", "createArguments": {"a": 1},
+                                      "choice": "Go", "choiceArgument": {"b": 2}}}]}},
+        price_per_byte=None)
+    check("create-and-exercise keeps its template", cae["tree"][0]["template"] == "#p:M:T")
+    check("create-and-exercise keeps its choice", cae["tree"][0]["choice"] == "Go")
+    check("create-and-exercise counts both payloads", cae["tree"][0]["payloadBytes"] > 0)
+
+    # hotSpots was capped at 5 inside the document, so rows vanished from JSON.
+    many = [ProfileNode(f"e{i}", "create", f"pkg:M:T{i}", None, 10, 10, 20, {})
+            for i in range(9)]
+    check("the document keeps every hot spot", len(hot_spots(many, {})) == 9,
+          str(len(hot_spots(many, {}))))
+
+    # Exported documents must not carry the author's home directory.
+    for row in (before.get("hotSpots") or []):
+        check("no absolute path in an exported profile",
+              not str(row.get("source") or "").startswith("/"), str(row.get("source")))
 
     # --- rendered output ---------------------------------------------------
     out = io.StringIO()
