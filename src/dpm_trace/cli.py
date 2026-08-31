@@ -658,12 +658,16 @@ def check_profile_budgets(profile: dict[str, Any], budgets: dict[str, Any]) -> l
                 continue
             actual = actuals.get(template, 0)
             if actual > limit:
+                # subject keeps the full id for CI; the message is for a person.
                 findings.append({
                     "budget": "maxTemplateBytes",
                     "subject": template,
                     "limit": int(limit),
                     "actual": actual,
-                    "message": f"{template} models {actual} B, over its {int(limit)} B budget",
+                    "message": (
+                        f"{display_template(template, False)} models {actual} B, "
+                        f"over its {int(limit)} B budget"
+                    ),
                 })
     return findings
 
