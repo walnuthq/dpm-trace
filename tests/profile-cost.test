@@ -26,5 +26,24 @@
 # JSON: "schema": "dpm-profile/v1"
 # JSON-NOT: measuredWireBytes
 
+# With daml-debug-info/v1 the size table becomes a place to go: each hot spot
+# names the file and line it is written at. Templates the metadata does not
+# cover say so rather than being dropped or guessed at.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile tx --trace %root/tests/fixtures/profile/transfer-after.trace-artifact.json --debug-info %root/tests/fixtures/debug-info-v1/asset.debug-info.json --source-root %root/tests/fixtures/debug-info-v1 | FileCheck --check-prefix=HOT %s
+
+# HOT: Hot spots
+# HOT: Asset:Asset
+# HOT-SAME: Asset.daml:9
+# HOT: Asset:Asset :: Transfer
+# HOT-SAME: Asset.daml:18
+# HOT: Asset:TransferLog :: Record
+# HOT-SAME: (source not resolved)
+
+# Without metadata it says why, instead of silently omitting the section.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile tx --trace %root/tests/fixtures/profile/transfer-after.trace-artifact.json | FileCheck --check-prefix=NOSRC %s
+
+# NOSRC: No source locations
+# NOSRC-SAME: --debug-info
+
 # Exit codes, sizing invariants, the diff, and the budget gate.
 # RUN: env PYTHONPATH=%root/src %python %root/tests/check-profile.py

@@ -19,7 +19,8 @@ Command surface:
 - `dpm trace test`: run Daml Script unit tests (unit mode) or an lit suite against a managed local Canton (`--integration`).
 - `dpm trace debug` (also `dpm debug` via `bin/dpm-debug`): source-level debugging for Daml Script runs from a JSONL runtime debug trace plus `daml-debug-info/v1` metadata (`--interactive` for the REPL).
 - `dpm profile tx`: profile what a transaction costs in serialized bytes, broken down by
-  node, template, and payload field. Input is an update id, `--prepared` (a prepared
+  node, template, and payload field, with a Hot spots ranking that names the file and
+  line each entry is written at when `daml-debug-info/v1` metadata is supplied. Input is an update id, `--prepared` (a prepared
   artifact), or `--trace` (an exported trace artifact). `--price-per-byte` adds a Canton
   Coin estimate, `--json`/`--export` give machine-readable output.
 - `dpm profile diff <before> <after>`: compare two profile documents.
@@ -46,7 +47,9 @@ Key areas to orient in the file:
 - Transaction model + normalization: `NormalizedTrace`, `TraceEvent`, `normalize_trace`, `load_update`.
 - Pretty + interactive rendering: `print_pretty_trace`, `Stepper` (the `--visualize` REPL).
 - Failed submissions / completions: `fetch_completion_by_command_id`, `normalize_completion`, `print_completion_trace`.
-- Cost profiling (`dpm profile`): `canonical_bytes` / `field_sizes` (the sizing model),
+- Cost profiling (`dpm profile`): `annotate_profile_sources` / `hot_spots` (source-keyed
+  ranking; template and choice locations come from `daml-debug-info/v1` only, since
+  `damlc inspect` carries no line numbers), `canonical_bytes` / `field_sizes` (the sizing model),
   `ProfileNode` + `profile_event` (the per-node tree), `rollup_by_template` /
   `rollup_by_field`, `measured_wire_bytes` (ground truth when a prepared transaction is
   present), `diff_profiles`, `check_profile_budgets`, `profile_main`.

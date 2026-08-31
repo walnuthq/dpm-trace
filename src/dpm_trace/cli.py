@@ -258,6 +258,58 @@ def profile_node_json(node: ProfileNode) -> dict[str, Any]:
     }
 
 
+def annotate_profile_sources(
+    nodes: list[ProfileNode], index: "SourceIndex | None"
+) -> dict[str, str]:
+    """Resolve each template and choice in the tree to a source location.
+
+    A size table that names `Asset:Asset` still leaves the developer grepping
+    for it. Names that point at a file and a line are the difference between
+    a report and a place to go.
+    """
+    if index is None:
+        return {}
+    found: dict[str, str] = {}
+    for node in walk_profile(nodes):
+        if not node.template:
+            continue
+        for choice in (node.choice, None):
+            loc = index.location_for_template(node.template, choice)
+            if loc is None:
+                continue
+            key = f"{node.template}.{choice}" if choice else node.template
+            found[key] = format_source_path(loc)
+            break
+    return found
+
+
+def hot_spots(
+    nodes: list[ProfileNode], sources: dict[str, str], limit: int = 5
+) -> list[dict[str, Any]]:
+    """Rank what costs the most, keyed to where it is written.
+
+    The size tables answer "how big"; this answers "where do I go first",
+    which is the question a developer actually arrives with.
+    """
+    acc: dict[tuple[str, str | None], int] = {}
+    for node in walk_profile(nodes):
+        if not node.template:
+            continue
+        key = (node.template, node.choice)
+        acc[key] = acc.get(key, 0) + node.self_bytes
+    rows: list[dict[str, Any]] = []
+    for (template, choice), size in acc.items():
+        label = f"{template}.{choice}" if choice else template
+        rows.append({
+            "template": template,
+            "choice": choice,
+            "selfBytes": size,
+            "source": sources.get(label) or sources.get(template),
+        })
+    rows.sort(key=lambda row: (-row["selfBytes"], row["template"]))
+    return rows[:limit]
+
+
 def rollup_by_template(nodes: list[ProfileNode]) -> list[dict[str, Any]]:
     acc: dict[str, dict[str, int]] = {}
     for node in walk_profile(nodes):
@@ -345,6 +397,7 @@ def build_profile(
     measured: dict[str, Any] | None,
     notes: list[str],
     canton_estimate: dict[str, Any] | None = None,
+    source_index: "SourceIndex | None" = None,
 ) -> dict[str, Any]:
     all_nodes = list(walk_profile(roots))
     modeled = sum(node.self_bytes for node in all_nodes)
@@ -367,12 +420,15 @@ def build_profile(
         totals["estimatedCostCC"] = round(basis * price_per_byte, 9)
         totals["pricePerByteCC"] = price_per_byte
         totals["costBasis"] = "measuredWireBytes" if measured else "modeledBytes"
+    sources = annotate_profile_sources(roots, source_index)
     return {
         "schema": PROFILE_SCHEMA,
         "kind": "cost-profile",
         "subject": subject,
         "origin": origin,
         "totals": totals,
+        "sources": sources,
+        "hotSpots": hot_spots(roots, sources),
         "byTemplate": rollup_by_template(roots),
         "byField": rollup_by_field(roots),
         "tree": [profile_node_json(node) for node in roots],
@@ -386,6 +442,7 @@ def profile_from_trace(
     price_per_byte: float | None,
     measured: dict[str, Any] | None = None,
     notes: list[str] | None = None,
+    source_index: "SourceIndex | None" = None,
 ) -> dict[str, Any]:
     seen: set[str] = set()
     roots = [
@@ -400,6 +457,7 @@ def profile_from_trace(
         price_per_byte=price_per_byte,
         measured=measured,
         notes=notes or [],
+        source_index=source_index,
     )
 
 
@@ -407,6 +465,7 @@ def profile_from_commands(
     artifact: dict[str, Any],
     *,
     price_per_byte: float | None,
+    source_index: "SourceIndex | None" = None,
 ) -> dict[str, Any]:
     """Profile a prepared artifact whose node tree is not available.
 
@@ -465,6 +524,7 @@ def profile_from_commands(
         measured=measured_wire_bytes(artifact),
         notes=notes,
         canton_estimate=canton_cost_estimate(artifact),
+        source_index=source_index,
     )
 
 
@@ -537,6 +597,17 @@ def render_profile(profile: dict[str, Any], *, top: int = 10, full_ids: bool = F
             f"  (estimate at {totals['pricePerByteCC']} CC/byte, basis {totals['costBasis']})"
         )
 
+    spots = profile.get("hotSpots") or []
+    if spots and any(row.get("source") for row in spots):
+        lines.append("")
+        lines.append("Hot spots")
+        for row in spots:
+            label = display_template(row["template"], full_ids)
+            if row.get("choice"):
+                label = f"{label} :: {row['choice']}"
+            where = row.get("source") or "(source not resolved)"
+            lines.append(f"  {format_bytes(int(row['selfBytes'])):>10}  {label}  {where}")
+
     by_template = profile.get("byTemplate") or []
     if by_template:
         lines.append("")
@@ -563,6 +634,13 @@ def render_profile(profile: dict[str, Any], *, top: int = 10, full_ids: bool = F
         lines.append("")
         lines.append("Tree")
         render_profile_tree(rebuild_profile_tree(tree), lines, full_ids=full_ids)
+
+    if spots and not any(row.get("source") for row in spots):
+        lines.append("")
+        lines.append(
+            "No source locations: pass --dar, --daml-yaml, or --debug-info to "
+            "resolve templates and choices to a file and line."
+        )
 
     notes = profile.get("notes") or []
     if notes:
@@ -771,16 +849,20 @@ def profile_main(argv: list[str]) -> int:
 
 def run_profile_tx(args: argparse.Namespace) -> int:
     price = args.price_per_byte
+    index = source_index_from_args(args) if (
+        args.dar or args.daml_yaml or args.source_root or args.debug_info
+    ) else None
 
     if args.prepared:
         artifact = json.loads(Path(args.prepared).read_text(encoding="utf-8"))
-        profile = profile_from_commands(artifact, price_per_byte=price)
+        profile = profile_from_commands(artifact, price_per_byte=price, source_index=index)
     elif args.trace_artifact:
         artifact = load_trace_artifact(Path(args.trace_artifact))
         profile = profile_from_trace(
             trace_from_artifact(artifact),
             price_per_byte=price,
             measured=measured_wire_bytes(artifact),
+            source_index=index or source_index_from_args(args, artifact),
         )
     elif args.update_id:
         apply_config_defaults(args, load_config(args.config))
@@ -789,6 +871,7 @@ def run_profile_tx(args: argparse.Namespace) -> int:
         profile = profile_from_trace(
             normalize_trace(raw, source, url, parties),
             price_per_byte=price,
+            source_index=index,
             notes=[
                 "Fetched as JSON, so no measured wire size is available. "
                 "Profile a prepared transaction for a ground-truth total."
@@ -4928,14 +5011,30 @@ class SourceIndex:
             if current_module:
                 self.inspect_modules.setdefault(current_module, []).append(line)
 
-    def location_for_event(self, ev: TraceEvent) -> SourceLocation | None:
-        parsed = parse_template_ref(ev.template)
+    def location_for_template(
+        self, template: str | None, choice: str | None = None
+    ) -> SourceLocation | None:
+        parsed = parse_template_ref(template)
         if parsed is None:
             return None
         package_id, module, entity = parsed
-        if ev.choice:
-            return self.choices.get(f"{package_id}:{module}:{entity}.{ev.choice}")
-        return self.templates.get(f"{package_id}:{module}:{entity}")
+        table = self.choices if choice else self.templates
+        suffix = f"{module}:{entity}.{choice}" if choice else f"{module}:{entity}"
+        exact = table.get(f"{package_id}:{suffix}")
+        if exact is not None:
+            return exact
+        # A prepared command names its package by name (`#asset-tests:Mod:T`)
+        # while the index is keyed by resolved package id. Match on the module
+        # and entity instead, but only when exactly one package provides them:
+        # with two versions of a package loaded, guessing would point the
+        # developer at the wrong source.
+        matches = {key: loc for key, loc in table.items() if key.endswith(f":{suffix}")}
+        if len(matches) == 1:
+            return next(iter(matches.values()))
+        return None
+
+    def location_for_event(self, ev: TraceEvent) -> SourceLocation | None:
+        return self.location_for_template(ev.template, ev.choice)
 
     def snippet(self, loc: SourceLocation, radius: int = 2) -> str:
         lines = self.files.get(loc.path)
