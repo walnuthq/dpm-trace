@@ -924,6 +924,293 @@ def render_profile_run(profile: dict[str, Any], *, top: int = 10) -> str:
     return "\n".join(lines)
 
 
+# Re-evaluation: the Daml engine evaluates a clause once per use, so a template
+# whose signatories are consulted seven times pays for seven evaluations. The
+# speedscope profile records every one of them, and no tool reports the count:
+# reading time alone shows a clause is expensive without showing that most of
+# the expense is repetition.
+def load_speedscope_profile(path: Path) -> tuple[list[str], list[dict[str, Any]], str]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    frames = [frame.get("name", "?") for frame in data.get("shared", {}).get("frames", [])]
+    profiles = data.get("profiles") or []
+    if not profiles:
+        raise ValueError(f"{path}: no profiles in the speedscope document")
+    profile = profiles[data.get("activeProfileIndex", 0)]
+    if profile.get("type") != "evented":
+        raise ValueError(f"{path}: expected an evented profile, got {profile.get('type')!r}")
+    return frames, profile.get("events") or [], profile.get("unit", "nanoseconds")
+
+
+# A clause evaluation is one of these frames: the engine opens `observers
+# @Module:Template` (or signatories/ensures) each time it needs that clause for
+# a contract node. Everything beneath is how the clause is implemented --
+# compiler helpers, then the standard library -- and belongs to the clause, not
+# to itself. Ranking by self time instead puts DA.List:stripInfix on top, which
+# is where the Daml profiler already leaves the reader.
+CLAUSE_ROOT = re.compile(r"^(observers|signatories|ensures) @([\w.]+):(\w+)$")
+NODE_FRAME = re.compile(r"^create @([\w.]+):(\w+)$")
+# The other places interpretation time goes. Attributing to the innermost of
+# these partitions the profile, so the table accounts for the whole of it
+# rather than describing the remainder in prose.
+WORK_FRAME = re.compile(r"^(create|exercise|fetch|lookup) @")
+
+
+def attribute_to_clauses(frames: list[str], events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Attribute every slice of time to the clause evaluation that caused it."""
+    clauses: dict[str, dict[str, int]] = {}
+    nodes: dict[str, int] = {}
+    total = 0
+    stack: list[int] = []
+    last = 0
+
+    for event in events:
+        at = int(event.get("at", 0))
+        index = int(event.get("frame", -1))
+        if stack:
+            total += at - last
+            # The innermost clause or node frame owns this slice.
+            for frame_index in reversed(stack):
+                name = frames[frame_index]
+                if CLAUSE_ROOT.match(name) or WORK_FRAME.match(name):
+                    row = clauses.setdefault(name, {"evaluations": 0, "attributed": 0, "frames": 0})
+                    row["attributed"] += at - last
+                    break
+        last = at
+
+        if event.get("type") == "O":
+            if 0 <= index < len(frames):
+                name = frames[index]
+                # Frames opened beneath a clause: how much work one evaluation
+                # is. Unlike time this is exact and integral, so it separates
+                # "derives a party list" from "reads a field" without a
+                # stopwatch.
+                for frame_index in reversed(stack):
+                    owner = frames[frame_index]
+                    if CLAUSE_ROOT.match(owner) or WORK_FRAME.match(owner):
+                        clauses.setdefault(owner, {"evaluations": 0, "attributed": 0, "frames": 0})
+                        clauses[owner]["frames"] += 1
+                        break
+                if CLAUSE_ROOT.match(name) or WORK_FRAME.match(name):
+                    clauses.setdefault(name, {"evaluations": 0, "attributed": 0, "frames": 0})
+                    clauses[name]["evaluations"] += 1
+                if NODE_FRAME.match(name):
+                    nodes[name] = nodes.get(name, 0) + 1
+                stack.append(index)
+        elif event.get("type") == "C":
+            if stack and stack[-1] == index:
+                stack.pop()
+
+    return {"clauses": clauses, "nodes": nodes, "total": total}
+
+
+def evaluation_profile_document(
+    analysis: dict[str, Any], *, subject: str, unit: str, helpers: dict[str, int]
+) -> dict[str, Any]:
+    total = analysis["total"] or 1
+    rows = [
+        {
+            "clause": name,
+            "evaluations": row["evaluations"],
+            "attributed": row["attributed"],
+            "perEvaluation": row["attributed"] // max(row["evaluations"], 1),
+            "framesPerEvaluation": row.get("frames", 0) // max(row["evaluations"], 1),
+            "share": round(100 * row["attributed"] / total, 1),
+        }
+        for name, row in analysis["clauses"].items()
+    ]
+    rows.sort(key=lambda row: -row["attributed"])
+    repeated = [
+        row
+        for row in rows
+        if row["evaluations"] > 1 and CLAUSE_ROOT.match(row["clause"])
+    ]
+
+    return {
+        "schema": PROFILE_SCHEMA,
+        "kind": "evaluation-profile",
+        "subject": subject,
+        "unit": unit,
+        "totals": {
+            "interpretation": analysis["total"],
+            # What sits inside a clause the engine evaluated more than once.
+            # Counting every repeated frame instead scores ~99% on any program,
+            # because a loop inside one splitOn is not re-evaluation.
+            "inRepeatedClauses": sum(row["attributed"] for row in repeated),
+            "clauses": len(rows),
+            "repeatedClauses": len(repeated),
+            "contractNodes": sum(analysis["nodes"].values()),
+        },
+        "clauses": rows,
+        # Kept for the record: these are how a clause is implemented, so they
+        # are not a separate finding.
+        "helpers": [
+            {"frame": frame, "evaluations": count}
+            for frame, count in sorted(helpers.items(), key=lambda kv: -kv[1])
+        ],
+    }
+
+
+def format_duration_ns(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f} ms"
+    if value >= 1_000:
+        return f"{value / 1_000:.0f} us"
+    return f"{value} ns"
+
+
+def render_evaluation_profile(profile: dict[str, Any], *, top: int = 10) -> str:
+    totals = profile["totals"]
+    interpretation = totals["interpretation"] or 1
+    rows = profile["clauses"]
+    repeated = [
+        row
+        for row in rows
+        if row["evaluations"] > 1 and CLAUSE_ROOT.match(row["clause"])
+    ]
+
+    lines = ["DPM evaluation profile", f"  subject:      {profile.get('subject', '-')}"]
+    created = totals["contractNodes"]
+    # Below this a clause is a field read: repeating it is free, and leading
+    # with it would imply a problem that is not there.
+    if repeated and repeated[0]["share"] >= 5.0:
+        worst = repeated[0]
+        kind = worst["clause"].split(" ", 1)[0]
+        lines.append(
+            f"  {kind} evaluated {worst['evaluations']}x"
+            f" — {format_duration_ns(worst['attributed'])}"
+            f" of {format_duration_ns(interpretation)} interpretation"
+            f" ({worst['share']:.0f}%)"
+        )
+        lines.append(
+            f"  {created} contract nodes created, {worst['evaluations'] - created} consumed"
+        )
+    elif repeated:
+        lines.append(
+            f"  no template clause costs anything: the most expensive is"
+            f" {format_duration_ns(repeated[0]['attributed'])}"
+            f" over {repeated[0]['evaluations']} evaluations"
+        )
+        lines.append(f"  {created} contract nodes created")
+    else:
+        lines.append("  no clause was evaluated more than once")
+
+    if rows:
+        lines.append("")
+        lines.append("Where interpretation went")
+        lines.append(
+            f"  {'evals':>5}  {'attributed':>11}  {'share':>6}  {'frames/eval':>11}  frame"
+        )
+        for row in rows[:top]:
+            label = row["clause"]
+            if row.get("source"):
+                label = f"{row['source']}  {label}"
+            lines.append(
+                f"  {row['evaluations']:>5}"
+                f"  {format_duration_ns(row['attributed']):>11}"
+                f"  {row['share']:>5.1f}%"
+                f"  {row['framesPerEvaluation']:>11}"
+                f"  {label}"
+            )
+
+    share = 100 * totals["inRepeatedClauses"] / interpretation
+    lines.append("")
+    lines.append(
+        f"{format_duration_ns(totals['inRepeatedClauses'])} of"
+        f" {format_duration_ns(interpretation)} ({share:.0f}%) is inside a clause"
+        f" evaluated more than once."
+    )
+    return "\n".join(lines)
+
+
+def render_evaluation_runs(profiles: list[dict[str, Any]], *, top: int = 10) -> str:
+    """Summarise repeated runs of the same script.
+
+    Evaluation counts are a property of the transaction and repeat exactly;
+    times are not. Showing both makes it obvious which number is safe to quote.
+    """
+    lines = ["DPM evaluation profile", f"  runs:         {len(profiles)}"]
+
+    interpretation = sorted(p["totals"]["interpretation"] for p in profiles)
+    mid = interpretation[len(interpretation) // 2]
+    lines.append(
+        f"  interpretation: median {format_duration_ns(mid)}"
+        f"  (range {format_duration_ns(interpretation[0])}"
+        f" to {format_duration_ns(interpretation[-1])})"
+    )
+
+    # Rank by median attributed time, so one noisy run cannot reorder the table.
+    per_clause: dict[str, list[dict[str, Any]]] = {}
+    for profile in profiles:
+        for row in profile["clauses"]:
+            per_clause.setdefault(row["clause"], []).append(row)
+
+    rows = []
+    for clause, seen in per_clause.items():
+        evaluations = sorted(r["evaluations"] for r in seen)
+        attributed = sorted(r["attributed"] for r in seen)
+        shares = sorted(r["share"] for r in seen)
+        rows.append(
+            {
+                "clause": clause,
+                "evaluations": evaluations[len(evaluations) // 2],
+                "evalRange": (evaluations[0], evaluations[-1]),
+                "attributed": attributed[len(attributed) // 2],
+                "share": shares[len(shares) // 2],
+            }
+        )
+    rows.sort(key=lambda row: -row["attributed"])
+
+    worst = rows[0] if rows else None
+    if worst and worst["evaluations"] > 1 and worst["share"] >= 5.0:
+        low, high = worst["evalRange"]
+        stable = "in every run" if low == high else f"varying {low}-{high}"
+        kind = worst["clause"].split(" ", 1)[0]
+        lines.append(
+            f"  {kind} evaluated {worst['evaluations']}x {stable}"
+            f" — median {format_duration_ns(worst['attributed'])} ({worst['share']:.0f}%)"
+        )
+
+    if rows:
+        lines.append("")
+        lines.append("Clause evaluations, by median time attributed to the clause")
+        lines.append(f"  {'evals':>7}  {'attributed':>11}  {'share':>6}  clause")
+        for row in rows[:top]:
+            low, high = row["evalRange"]
+            evals = f"{row['evaluations']}" if low == high else f"{low}-{high}"
+            lines.append(
+                f"  {evals:>7}"
+                f"  {format_duration_ns(row['attributed']):>11}"
+                f"  {row['share']:>5.1f}%"
+                f"  {row['clause']}"
+            )
+    return "\n".join(lines)
+
+
+def run_profile_eval(args: argparse.Namespace) -> int:
+    profiles = [evaluation_document_for(Path(p), source_index_from_args(args)) for p in args.profile]
+
+    # Timings move run to run; evaluation counts do not. Reporting several
+    # profiles together shows which of the two a number is.
+    if len(profiles) > 1:
+        if args.json:
+            print(json.dumps(profiles, indent=2, sort_keys=True))
+            return PROFILE_EXIT_OK
+        print(render_evaluation_runs(profiles, top=args.top))
+        return PROFILE_EXIT_OK
+
+    profile = profiles[0]
+    if args.export:
+        Path(args.export).write_text(
+            json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(f"wrote profile: {args.export}")
+    if args.json:
+        print(json.dumps(profile, indent=2, sort_keys=True))
+    elif not args.export:
+        print(render_evaluation_profile(profile, top=args.top))
+    return PROFILE_EXIT_OK
+
+
 def profile_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="dpm profile",
@@ -949,7 +1236,19 @@ def profile_main(argv: list[str]) -> int:
     diff.add_argument("--full-ids", action="store_true", help="Show full package ids instead of Module:Template.")
 
     run = sub.add_parser("run", help="Profile a Daml Script run: how often each source location executed.")
-    run.add_argument("trace", help="JSONL runtime debug trace from `daml script --debug-trace-file`.")
+    run.add_argument(
+        "trace",
+        nargs="?",
+        help="JSONL runtime debug trace from `daml script --debug-trace-file`.",
+    )
+    run.add_argument(
+        "--profile",
+        action="extend",
+        nargs="+",
+        default=[],
+        help="Speedscope profile from the Daml profiler. Repeatable. Adds where "
+        "interpretation went, and how often each clause was evaluated.",
+    )
     run.add_argument("--debug-info", action="append", default=[], help="daml-debug-info/v1 file. Repeatable.")
     run.add_argument("--source-root", action="append", default=[], help="Source root. Repeatable.")
     run.add_argument("--dar", action="append", default=[], help="DAR for package metadata. Repeatable.")
@@ -958,6 +1257,22 @@ def profile_main(argv: list[str]) -> int:
     run.add_argument("--export", help="Write the profile document as JSON.")
     run.add_argument("--json", action="store_true", help="Print the profile as JSON.")
     run.add_argument("--top", type=int, default=10, help="How many rows. Default 10.")
+
+    ev = sub.add_parser("eval", help="Report how often each Daml clause was evaluated.")
+    ev.add_argument(
+        "profile",
+        nargs="+",
+        help="Speedscope profile(s) written by the Daml profiler. Repeated runs of "
+        "one script produce one file each; passing several reports them together.",
+    )
+    ev.add_argument("--debug-info", action="append", default=[], help="daml-debug-info/v1 file. Repeatable.")
+    ev.add_argument("--source-root", action="append", default=[], help="Source root. Repeatable.")
+    ev.add_argument("--dar", action="append", default=[], help="DAR for package metadata. Repeatable.")
+    ev.add_argument("--daml-yaml", action="append", default=[], help="daml.yaml. Repeatable.")
+    ev.add_argument("--damlc", help="damlc/daml executable.")
+    ev.add_argument("--export", help="Write the profile document as JSON.")
+    ev.add_argument("--json", action="store_true", help="Print the profile as JSON.")
+    ev.add_argument("--top", type=int, default=10, help="How many rows. Default 10.")
 
     check = sub.add_parser("check", help="Fail when a profile exceeds its budgets.")
     check.add_argument("profile", help="Profile document to check.")
@@ -975,6 +1290,8 @@ def profile_main(argv: list[str]) -> int:
             return run_profile_run(args)
         if args.profile_command == "diff":
             return run_profile_diff(args)
+        if args.profile_command == "eval":
+            return run_profile_eval(args)
         return run_profile_check(args)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1025,26 +1342,154 @@ def run_profile_tx(args: argparse.Namespace) -> int:
     return PROFILE_EXIT_OK
 
 
-def run_profile_run(args: argparse.Namespace) -> int:
-    index = source_index_from_args(args)
-    events, junk = load_debug_trace_events(Path(args.trace))
-    steps = normalize_debug_steps(events, index)
-    profile = profile_run_document(
-        steps, subject=Path(args.trace).name, source="daml-script-debug-trace"
+FRAME_TARGET = re.compile(
+    r"^(?:observers|signatories|ensures|create|fetch|lookup) @([\w.]+):(\w+)$"
+    r"|^exercise @([\w.]+):(\w+) (\w+)$"
+)
+
+
+def locate_frame(frame: str, index: "SourceIndex | None") -> str | None:
+    """Put a clause frame on the file and line its template is defined at.
+
+    The execution profile already speaks in source locations; without this the
+    evaluation half speaks in frame names, and the two cannot be read together.
+    """
+    if index is None:
+        return None
+    match = FRAME_TARGET.match(frame)
+    if not match:
+        return None
+    module, entity, ex_module, ex_entity, choice = match.groups()
+    if ex_module:
+        module, entity = ex_module, ex_entity
+    # A speedscope frame names the module and entity but not the package, and
+    # the resolver wants a three-part reference. Its suffix fallback matches on
+    # module and entity when exactly one package provides them, which is what a
+    # frame can support.
+    ref = f"#unknown:{module}:{entity}"
+    location = index.location_for_template(ref, choice)
+    if location is None and choice:
+        location = index.location_for_template(ref)
+    return format_source_path(location) if location else None
+
+
+def mismatched_subjects(
+    executions: list[dict[str, Any]], evaluations: list[dict[str, Any]]
+) -> str | None:
+    """Warn when the trace and the profiles describe different code."""
+    if not executions or not evaluations:
+        return None
+
+    def modules_of_execution(doc: dict[str, Any]) -> set[str]:
+        found = set()
+        for row in doc.get("hotSpots") or []:
+            label = row.get("label") or ""
+            if ":" in label:
+                found.add(label.split(":", 1)[0])
+        return found
+
+    def modules_of_evaluation(doc: dict[str, Any]) -> set[str]:
+        found = set()
+        for row in doc.get("clauses") or []:
+            match = re.search(r"@([\w.]+):", row.get("clause", ""))
+            if match:
+                found.add(match.group(1))
+        return found
+
+    left: set[str] = set()
+    for doc in executions:
+        left |= modules_of_execution(doc)
+    right: set[str] = set()
+    for doc in evaluations:
+        right |= modules_of_evaluation(doc)
+    if not left or not right or left & right:
+        return None
+    return (
+        f"Note: the trace covers {', '.join(sorted(left))} and the profiles cover"
+        f" {', '.join(sorted(right))}. They describe different runs, so the two"
+        f" sections cannot be read together."
     )
-    if junk:
-        profile.setdefault("notes", []).append(
-            f"{junk} line(s) in the trace were not valid JSON objects and were skipped."
+
+
+def evaluation_document_for(path: Path, index: "SourceIndex | None" = None) -> dict[str, Any]:
+    frames, events, unit = load_speedscope_profile(path)
+    analysis = attribute_to_clauses(frames, events)
+    helpers: dict[str, int] = {}
+    for event in events:
+        if event.get("type") == "O":
+            frame_index = int(event.get("frame", -1))
+            if 0 <= frame_index < len(frames) and "$" in frames[frame_index]:
+                helpers[frames[frame_index]] = helpers.get(frames[frame_index], 0) + 1
+    document = evaluation_profile_document(analysis, subject=path.name, unit=unit, helpers=helpers)
+    for row in document["clauses"]:
+        located = locate_frame(row["clause"], index)
+        if located:
+            row["source"] = located
+    return document
+
+
+def run_profile_run(args: argparse.Namespace) -> int:
+    """Report a Daml Script run from both artifacts it leaves behind.
+
+    The script trace says which source lines executed; the profiler's
+    speedscope files say where interpretation time went and how many times
+    each clause was evaluated. They answer halves of one question, so reading
+    them in one pass avoids correlating two outputs by hand.
+    """
+    if not args.trace and not args.profile:
+        print(
+            "error: give a script trace, --profile, or both",
+            file=sys.stderr,
         )
+        return PROFILE_EXIT_ERROR
+
+    documents: list[dict[str, Any]] = []
+    if args.trace:
+        index = source_index_from_args(args)
+        events, junk = load_debug_trace_events(Path(args.trace))
+        steps = normalize_debug_steps(events, index)
+        profile = profile_run_document(
+            steps, subject=Path(args.trace).name, source="daml-script-debug-trace"
+        )
+        if junk:
+            profile.setdefault("notes", []).append(
+                f"{junk} line(s) in the trace were not valid JSON objects and were skipped."
+            )
+        documents.append(profile)
+
+    evaluations = [
+        evaluation_document_for(Path(path), source_index_from_args(args))
+        for path in args.profile
+    ]
+
     if args.export:
+        payload = documents + evaluations
         Path(args.export).write_text(
-            json.dumps(profile, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            json.dumps(payload if len(payload) > 1 else payload[0], indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
         )
         print(f"wrote profile: {args.export}")
     if args.json:
-        print(json.dumps(profile, indent=2, sort_keys=True))
-    elif not args.export:
-        print(render_profile_run(profile, top=args.top))
+        payload = documents + evaluations
+        print(json.dumps(payload if len(payload) > 1 else payload[0], indent=2, sort_keys=True))
+        return PROFILE_EXIT_OK
+    if args.export:
+        return PROFILE_EXIT_OK
+
+    # The two halves come from separate artifacts and nothing links them. When
+    # they do not even mention the same module they describe different runs,
+    # and printing them together invites the reader to relate them.
+    warning = mismatched_subjects(documents, evaluations)
+
+    rendered = [render_profile_run(doc, top=args.top) for doc in documents]
+    if len(evaluations) == 1:
+        rendered.append(render_evaluation_profile(evaluations[0], top=args.top))
+    elif evaluations:
+        rendered.append(render_evaluation_runs(evaluations, top=args.top))
+    if warning:
+        rendered.append(warning)
+    print("\n\n".join(rendered))
     return PROFILE_EXIT_OK
 
 

@@ -1,0 +1,239 @@
+{
+ "$schema": "https://www.speedscope.app/file-format-schema.json",
+ "exporter": "Daml Engine",
+ "name": "exercise:Asset:Split",
+ "activeProfileIndex": 0,
+ "shared": {
+  "frames": [
+   {
+    "name": "exercise @Asset:Asset Split"
+   },
+   {
+    "name": "observers @Asset:Asset"
+   },
+   {
+    "name": "Asset:$cobserver"
+   },
+   {
+    "name": "DA.List:sort"
+   },
+   {
+    "name": "signatories @Asset:Asset"
+   },
+   {
+    "name": "create @Asset:Asset"
+   }
+  ]
+ },
+ "profiles": [
+  {
+   "type": "evented",
+   "name": "exercise:Asset:Split",
+   "unit": "nanoseconds",
+   "startValue": 0,
+   "endValue": 4278,
+   "events": [
+    {
+     "type": "O",
+     "at": 0,
+     "frame": 0
+    },
+    {
+     "type": "O",
+     "at": 100,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 100,
+     "frame": 2
+    },
+    {
+     "type": "O",
+     "at": 100,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 1100,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 1110,
+     "frame": 2
+    },
+    {
+     "type": "C",
+     "at": 1115,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 1115,
+     "frame": 4
+    },
+    {
+     "type": "C",
+     "at": 1117,
+     "frame": 4
+    },
+    {
+     "type": "O",
+     "at": 1117,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 1117,
+     "frame": 2
+    },
+    {
+     "type": "O",
+     "at": 1117,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 2117,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 2127,
+     "frame": 2
+    },
+    {
+     "type": "C",
+     "at": 2132,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 2132,
+     "frame": 4
+    },
+    {
+     "type": "C",
+     "at": 2134,
+     "frame": 4
+    },
+    {
+     "type": "O",
+     "at": 2134,
+     "frame": 5
+    },
+    {
+     "type": "C",
+     "at": 2154,
+     "frame": 5
+    },
+    {
+     "type": "O",
+     "at": 2154,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 2154,
+     "frame": 2
+    },
+    {
+     "type": "O",
+     "at": 2154,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 3154,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 3164,
+     "frame": 2
+    },
+    {
+     "type": "C",
+     "at": 3169,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 3169,
+     "frame": 4
+    },
+    {
+     "type": "C",
+     "at": 3171,
+     "frame": 4
+    },
+    {
+     "type": "O",
+     "at": 3171,
+     "frame": 5
+    },
+    {
+     "type": "C",
+     "at": 3191,
+     "frame": 5
+    },
+    {
+     "type": "O",
+     "at": 3191,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 3191,
+     "frame": 2
+    },
+    {
+     "type": "O",
+     "at": 3191,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 4191,
+     "frame": 3
+    },
+    {
+     "type": "C",
+     "at": 4201,
+     "frame": 2
+    },
+    {
+     "type": "C",
+     "at": 4206,
+     "frame": 1
+    },
+    {
+     "type": "O",
+     "at": 4206,
+     "frame": 4
+    },
+    {
+     "type": "C",
+     "at": 4208,
+     "frame": 4
+    },
+    {
+     "type": "O",
+     "at": 4208,
+     "frame": 5
+    },
+    {
+     "type": "C",
+     "at": 4228,
+     "frame": 5
+    },
+    {
+     "type": "C",
+     "at": 4278,
+     "frame": 0
+    }
+   ]
+  }
+ ]
+}
