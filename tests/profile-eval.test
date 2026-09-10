@@ -1,0 +1,30 @@
+# Clause evaluations and the time attributed to them. The fixture is a small
+# evented speedscope profile: one Split creating three contracts, whose
+# observer clause sorts and whose signatory clause reads a field.
+
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile eval %root/tests/fixtures/profile/asset-split.speedscope.json | FileCheck %s
+
+# The engine evaluates a clause once per contract node: three created plus one
+# consumed.
+# CHECK: DPM evaluation profile
+# CHECK: observers evaluated 4x
+# CHECK-SAME: interpretation
+# CHECK: 3 contract nodes created, 1 consumed
+
+# Ranked by time attributed to the clause, not self time, so the clause that
+# called the library function is named rather than the library function.
+# CHECK: Where interpretation went
+# CHECK: observers @Asset:Asset
+# CHECK: signatories @Asset:Asset
+# CHECK: is inside a clause evaluated more than once
+
+# The same report from `profile run`, which is where the workflow reads it.
+# RUN: env PYTHONPATH=%root/src %python -m dpm_trace.cli profile run --profile %root/tests/fixtures/profile/asset-split.speedscope.json | FileCheck %s --check-prefix VIA
+
+# VIA: DPM evaluation profile
+# VIA: observers evaluated 4x
+
+# Neither input is an error worth guessing at.
+# RUN: env PYTHONPATH=%root/src not %python -m dpm_trace.cli profile run 2>&1 | FileCheck %s --check-prefix EMPTY
+
+# EMPTY: error: give a script trace, --profile, or both
