@@ -8,5 +8,6 @@ $ dpm trace compare --prepared tests/fixtures/compare/prepared.json --update tes
 
   Events
     = create Counter:Counter                             (2 fields match)
+    child events not compared: the prepared artifact carries no preparedTransaction
 
   Context   act-as Alice::aaaaaaaa...000001   read-as Alice::aaaaaaaa...000001   sync 2024-01-15T10:00:55Z

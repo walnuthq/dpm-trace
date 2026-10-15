@@ -415,8 +415,30 @@ func PreparedArtifactSummary(artifact map[string]any) string {
 		}
 	}
 
+	if response != nil {
+		if tx, err := model.PreparedTransactionFromResponse(response); err == nil {
+			lines = append(lines, "", "Transaction (as the participant would commit it)")
+			lines = append(lines, preparedTreeLines(tx)...)
+		}
+	}
+
 	lines = append(lines, "", "This is prepared transaction data from a non-committing prepare call.")
 	return strings.Join(lines, "\n")
+}
+
+// preparedTreeLines draws a prepared transaction with the tree `dpm trace`
+// draws a committed one, so the two read the same way.
+func preparedTreeLines(tx *model.PreparedTransaction) []string {
+	trace := tx.Trace(nil)
+	if len(trace.RootEventIDs) == 0 {
+		return []string{"  no events"}
+	}
+	var b strings.Builder
+	ctx := NewContext(trace)
+	for i, eventID := range trace.RootEventIDs {
+		eventTree(&b, trace, eventID, "  ", i == len(trace.RootEventIDs)-1, Color{}, ctx, nil)
+	}
+	return strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
 }
 
 func stringField(obj map[string]any, key string) string {

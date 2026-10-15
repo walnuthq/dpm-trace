@@ -108,7 +108,20 @@ Prepared command
   command id:   dpm-trace-prepare-04427c1b4565
   prepared hash:FtItr2nW1XjyV+FNOyU16Wib3D1ccZrWewE42KtyBwE=
   hashing:      HASHING_SCHEME_VERSION_V2
+
+Transaction (as the participant would commit it)
+  └── [0] EXERCISE Asset:Asset.Transfer
+      ├── actors: Alice
+      ├── argument: { newOwner: Bob }
+      └── [1] CREATE Asset:Asset
+          ├── signatories: Issuer
+          ├── observers: Bob
+          └── payload: { issuer: Issuer, owner: Bob, name: SILVER, quantity: 100 }
 ```
+
+The transaction is decoded from the participant's `preparedTransaction`, so it
+shows every event the command would produce, children included, not only the
+command you sent.
 
 **Nothing has happened on the ledger.** A prepared transaction is what the
 participant *would* commit if the submission were signed and sent. No contract
@@ -179,9 +192,24 @@ Either way the view states the absence rather than inventing an id:
 ```
 
 **A command rejected during interpretation never reaches the ledger**, so it
-produces no completion at all and `--command-id` will not find it. That is not
-a bug in the lookup: there is nothing to find. Capture the submission response
+produces no completion at all and `--command-id` will not find it because there is nothing to find. Capture the submission response
 and use `--completion-file`.
+
+| Failure | Example | `--command-id` | `--completion-file` |
+| --- | --- | --- | --- |
+| Before sequencing | a failed `assert` (`DAML_FAILURE`), `CONTRACT_NOT_FOUND`, missing authorization, a reused command id (`DUPLICATE_COMMAND`) | no completion | yes |
+| After sequencing | contention over the same contract (`LOCAL_VERDICT_LOCKED_CONTRACTS`), a contract archived by a concurrent transaction, a mediator timeout | yes | yes |
+
+`--completion-file` therefore works for every rejection, which is why the
+failure summary `submit` prints suggests it:
+
+```
+  Next
+    dpm trace compare --prepared <prepared.json> --completion-file failure.json
+```
+
+That is the line when `--export failure.json` was given. Without `--export`
+there is no file yet, so the summary says to rerun with it first.
 
 `--log-file` correlates a completion with operator logs, matching on command
 id, submission id, trace id and correlation id. It is optional and local; the
@@ -218,8 +246,27 @@ are reported per event:
     ~ exercise Asset:Asset.Transfer    newOwner: Bob::1220bc0a... → Mallory::1220ffff...
 ```
 
-**Between a prepared command and a committed update:** the command id, the
-commands themselves, and whether what committed matches what was prepared.
+**Between a prepared command and a committed update:** the whole transaction,
+event by event. The prepared side is the transaction the participant computed,
+decoded from the artifact's `preparedTransaction`, so a difference in a child
+event is reported as well as one in the command itself:
+
+```
+  Events
+    = exercise Asset:Asset.Transfer                      (1 field matches)
+      ~ create Asset:Asset                                 quantity: 100 → 1
+```
+
+The prepared transaction is projected the way the committed one was: only the
+events the committed trace's `--read-as` parties witness, without fetches or
+rolled-back subtrees, which a committed transaction does not report. Contracts
+the transaction creates get a new id each time a command is interpreted, so
+they are compared by position — the first contract created on one side against
+the first on the other.
+
+An artifact without a decodable `preparedTransaction` falls back to comparing
+the commands against the root events, and the output says that child events
+were not compared.
 
 **Between a prepared command and a completion:** the command id (reported as
 `match` when they are the same submission), completion status, error details,

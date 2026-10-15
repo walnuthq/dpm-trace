@@ -52,9 +52,12 @@ archives:
       # Source for the example package, so the DAR can be rebuilt.
       - examples/asset/daml.yaml
       - examples/asset/daml/*
+      # Built by release.yml, so the examples run without building the Daml.
+      - examples/asset/.daml/dist/asset-tests-1.0.0.dar
       # The Canton config both READMEs tell the reader to boot.
       - examples/devnet-trace.conf
       - examples/devnet-trace.bootstrap.canton
+      - examples/up.sh
 
 checksum:
   name_template: checksums.txt

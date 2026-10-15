@@ -250,7 +250,12 @@ func pythonRepr(s string) string {
 // It leads with what you sent rather than with completion metadata, because a
 // rejected submission has no transaction to inspect -- the command and the
 // error are the whole story.
-func SubmitFailure(w io.Writer, c *model.Completion, request map[string]any, color Color, index *source.Index, maxSourceLocations int) {
+//
+// The next step reads the rejection back from exportPath rather than looking
+// the command id up: an interpretation failure never reaches the ledger, so it
+// has no completion to find, while the captured response exists for every
+// rejection.
+func SubmitFailure(w io.Writer, c *model.Completion, request map[string]any, exportPath string, color Color, index *source.Index, maxSourceLocations int) {
 	statusCode, message := c.StatusFields()
 	commandID := c.String("commandId", "command_id")
 	if commandID == "" {
@@ -338,7 +343,11 @@ func SubmitFailure(w io.Writer, c *model.Completion, request map[string]any, col
 	}
 
 	fmt.Fprintln(w, "  Next")
-	fmt.Fprintf(w, "    dpm trace compare --command-id %s --prepared <prepared.json>\n", commandID)
+	if exportPath == "" {
+		fmt.Fprintln(w, "    rerun with --export <file> to capture this rejection, then")
+		exportPath = "<file>"
+	}
+	fmt.Fprintf(w, "    dpm trace compare --prepared <prepared.json> --completion-file %s\n", exportPath)
 }
 
 // formatCommandSummary renders one submitted command. Ports _format_command_summary.

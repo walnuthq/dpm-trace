@@ -1,0 +1,13 @@
+$ dpm trace compare --prepared tests/fixtures/child-diff/prepared.json --update tests/fixtures/child-diff/update-tampered.json --color never
+--- exit: 0
+--- stdout:
+✗ 1 difference (1 value)     kind: prepared-vs-update
+
+  A  command dpm-trace-prepare...   (prepared)
+  B  update 1220c8f9d...  @ offset 46   (committed)
+
+  Events
+    = exercise Asset:Asset.Transfer                      (1 field matches)
+      ~ create Asset:Asset                                 quantity: 100 → 1
+
+  Context   act-as Alice::122036f5...7213a4   read-as Issuer::122036f5...7213a4   sync 2026-08-14T10:51:05.732693Z

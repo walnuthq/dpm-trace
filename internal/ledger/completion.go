@@ -92,8 +92,8 @@ func (c *Client) FetchCompletion(lookup CompletionLookup) (*model.Completion, er
 	return nil, fmt.Errorf(
 		"no completion for command '%s'.\n"+
 			"A command rejected during interpretation never reaches the ledger, so it has no "+
-			"completion to look up; capture the rejection with `submit --allow-fail --print-json` "+
-			"and read it with --completion-file.\n"+
+			"completion to look up; capture the rejection with `submit --export <file>` "+
+			"and read it with --completion-file <file>.\n"+
 			"If the command was sequenced, it may be outside the queried window: widen it with "+
 			"--begin-exclusive or --completion-limit",
 		lookup.CommandID)

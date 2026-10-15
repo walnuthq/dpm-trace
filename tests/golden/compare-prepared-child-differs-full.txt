@@ -1,0 +1,29 @@
+$ dpm trace compare --prepared tests/fixtures/child-diff/prepared.json --update tests/fixtures/child-diff/update-tampered.json --color never --full
+--- exit: 0
+--- stdout:
+DPM trace comparison
+  kind:   prepared-vs-update
+  result: visible differences found
+
+Operation
+  prepared:  EXERCISE Asset:Asset.Transfer (0059f0a55ba182af89abbf3213b2df6bbdeaba0409a9d...)
+  committed: EXERCISE Asset:Asset.Transfer (0059f0a55ba182af89abbf3213b2df6bbdeaba0409a9d...)
+  shape:     matches
+
+Event diff
+  [0] EXERCISE Asset:Asset.Transfer (0059f0a55ba182af89abbf3213b2df6bbdeaba0409a9d...) same, children differ
+      CREATE Asset:Asset (<created #1>) quantity: 100 → 1
+
+Context
+  command id: dpm-trace-<id>
+  prep hash:  FtItr2nW1XjyV+FNOyU16Wib3D1ccZrWewE42KtyBwE=
+  update:     1220c8f9d9b2ca3aa72aae3eee228cb84e30e559dfdcfc2b7189def41a3b4589b6d5
+  offset:     46
+  act-as:     Alice::122036f5...7213a4
+  read-as:    Issuer::122036f5...7213a4
+
+Committed state diff
+  create   1
+  exercise 1
+  archive  1
+  other    0

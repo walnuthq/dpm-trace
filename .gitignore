@@ -12,6 +12,10 @@ tests/.lit/
 # Daml build output for the examples package
 examples/asset/.daml/
 
+# Written by examples/up.sh
+examples/.env
+examples/.up/
+
 # Dumped into the working directory by the Canton jar
 reference.conf
 

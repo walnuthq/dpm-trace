@@ -39,6 +39,15 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Install DPM and the SDK the example pins
+        run: |
+          sdk="$(sed -n 's/^sdk-version: *//p' examples/asset/daml.yaml)"
+          curl -sSL https://get.digitalasset.com/install/install.sh | sh -s "$sdk"
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+
+      - name: Build the example DAR
+        run: cd examples/asset && dpm build
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
@@ -47,8 +56,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Proves the archive a user downloads actually runs, and that the binary
-      # is where the README says it is.
+      # and the example DAR are where the READMEs say they are.
       - name: Smoke-test the linux archive
         run: |
           tar xzf dist/dpm-trace_*_linux_amd64.tar.gz -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/dpm-trace" --version
+          test -s "$RUNNER_TEMP/examples/asset/.daml/dist/asset-tests-1.0.0.dar"
+          test -x "$RUNNER_TEMP/examples/up.sh"

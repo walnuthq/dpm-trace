@@ -7,7 +7,10 @@ import lit.formats
 # Canton node that `dpm trace test --integration` boots; connection details
 # arrive via DPM_TRACE_IT_* environment variables.
 config.name = "dpm-trace-integration"
-config.test_format = lit.formats.ShTest(execute_external=True)  # real /bin/sh: $(...) etc.
+try:
+    config.test_format = lit.formats.ShTest(execute_external=True, force_execute_external=True)  # real /bin/sh: $(...) etc.
+except TypeError:
+    config.test_format = lit.formats.ShTest(execute_external=True)
 config.suffixes = [".test"]
 config.excludes = ["demos"]
 config.test_source_root = os.path.dirname(__file__)

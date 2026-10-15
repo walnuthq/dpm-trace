@@ -17,7 +17,7 @@ jobs:
     env:
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
-      SDK_VERSION: '3.4.11'
+      SDK_VERSION: '3.5.1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -33,13 +33,13 @@ jobs:
           repository: walnuthq/daml-contracts
           path: daml-contracts
 
-      - name: Install Daml SDK (ships the Canton jar)
+      - name: Install DPM and the Daml SDK (ships the Canton jar)
         run: |
-          curl -sSL https://get.daml.com/ | sh -s "$SDK_VERSION"
-          echo "$HOME/.daml/bin" >> "$GITHUB_PATH"
+          curl -sSL https://get.digitalasset.com/install/install.sh | sh -s "$SDK_VERSION"
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
           # Exported here rather than in an env: block, which is not shell
           # expanded -- and hardcoding the runner's home is a path leak.
-          echo "DPM_TRACE_CANTON_JAR=$HOME/.daml/sdk/$SDK_VERSION/canton/canton.jar" >> "$GITHUB_ENV"
+          echo "DPM_TRACE_CANTON_JAR=$HOME/.dpm/cache/components/canton-open-source/$SDK_VERSION/lib/canton-open-source-$SDK_VERSION.jar" >> "$GITHUB_ENV"
 
       - name: Install lit + FileCheck
         run: |
@@ -75,7 +75,7 @@ jobs:
 
           (cd "$DPM_TRACE_DAML_TESTS_DIR" \
              && "$RUNNER_TEMP/dpm-cov" trace test --integration itests/ \
-                  --canton-jar "$DPM_TRACE_CANTON_JAR" \
+                  --canton-jar "$DPM_TRACE_CANTON_JAR" --daml dpm \
                   --parties Alice@1,Bob@2,Issuer@1) \
             || echo "::warning::the integration suite reported failures"
 

@@ -10,13 +10,8 @@ Operation
   committed: EXERCISE Asset:Asset.Transfer (0059f0a55ba182af89abbf3213b2df6bbdeaba0409a9d...)
   shape:     matches
 
-Field diff
-  [0] EXERCISE Asset:Asset.Transfer (0059f0a55ba182af89abbf3213b2df6bbdeaba0409a9d...)
-    choice argument:
-      (matches)
-        newOwner: Bob::1220bc0a0061582e9c8b49216c664d89319f440129fd8b2b0304ddcdd5e7f98dd640
-    acting:      Alice::122036f5...7213a4
-    witnesses:   Issuer::122036f5...7213a4
+Event diff
+  [0] EXERCISE Asset:Asset.Transfer (0059f0a55ba182af89abbf3213b2df6bbdeaba0409a9d...) same
 
 Context
   command id: dpm-trace-<id>

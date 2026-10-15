@@ -88,7 +88,7 @@ func TestFetchCompletionNotFoundNamesTheLikelyCause(t *testing.T) {
 	if err == nil {
 		t.Fatal("missing completion returned no error")
 	}
-	for _, want := range []string{"never reaches the ledger", "--allow-fail", "--completion-file", "--begin-exclusive", "--completion-limit"} {
+	for _, want := range []string{"never reaches the ledger", "--export", "--completion-file", "--begin-exclusive", "--completion-limit"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q: %v", want, err)
 		}

@@ -133,7 +133,7 @@ func TestComparePreparedVsUpdate(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, stderr)
 	}
-	for _, want := range []string{"prepared-vs-update", "Operation", "Field diff", "prep hash"} {
+	for _, want := range []string{"prepared-vs-update", "Operation", "Event diff", "prep hash"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("missing %q in:\n%s", want, stdout)
 		}

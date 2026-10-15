@@ -19,6 +19,7 @@ Field diff
     acting:      Alice::aaaaaaaa...000001
     signatories: Alice::aaaaaaaa...000001
     witnesses:   Alice::aaaaaaaa...000001
+  child events not compared: the prepared artifact carries no preparedTransaction
 
 Context
   command id: dpm-trace-prepare-001

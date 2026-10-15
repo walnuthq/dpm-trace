@@ -107,7 +107,7 @@ func runSubmit(args []string) int {
 			if opts.full {
 				render.CompletionTrace(os.Stdout, completion, color, index, opts.maxSourceLoc)
 			} else {
-				render.SubmitFailure(os.Stdout, completion, request, color, index, opts.maxSourceLoc)
+				render.SubmitFailure(os.Stdout, completion, request, opts.export, color, index, opts.maxSourceLoc)
 			}
 		}
 		if opts.allowFail {

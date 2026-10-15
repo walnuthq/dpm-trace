@@ -11,15 +11,26 @@ import (
 
 // PreparedUpdateComparison writes a prepared-vs-update comparison.
 // Ports print_prepared_update_comparison.
+//
+// With the prepared transaction decoded, both sides are event trees and every
+// event is compared, children included. Without it, only the commands can be
+// compared against the root events, and the output says so.
 func PreparedUpdateComparison(w io.Writer, c *model.PreparedComparison, color Color, compact bool) {
-	hasDifferences := preparedUpdateHasDifferences(c.Commands, c.RootEvents)
+	var nValue, nOnlyA, nOnlyB int
+	var hasDifferences bool
+	if c.TreeCompared {
+		nValue, nOnlyA, nOnlyB = countEventDiffs(c.PreparedTree, c.CommittedTree)
+		hasDifferences = nValue+nOnlyA+nOnlyB > 0
+	} else {
+		nValue, nOnlyA, nOnlyB = countCommandEventDiffs(c.Commands, c.RootEvents)
+		hasDifferences = preparedUpdateHasDifferences(c.Commands, c.RootEvents)
+	}
 
 	if !compact {
 		preparedUpdateFull(w, c, color, hasDifferences)
 		return
 	}
 
-	nValue, nOnlyA, nOnlyB := countCommandEventDiffs(c.Commands, c.RootEvents)
 	if hasDifferences {
 		total := nValue + nOnlyA + nOnlyB
 		var parts []string
@@ -49,7 +60,12 @@ func PreparedUpdateComparison(w io.Writer, c *model.PreparedComparison, color Co
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "  Events")
-	printCommandEventRowsCompact(w, c.Commands, c.RootEvents, color, "    ", 50)
+	if c.TreeCompared {
+		printEventRowsCompact(w, c.PreparedTree, c.CommittedTree, color, "    ", 50)
+	} else {
+		printCommandEventRowsCompact(w, c.Commands, c.RootEvents, color, "    ", 50)
+		fmt.Fprintln(w, color.Apply("    child events not compared: "+c.TreeSkipped, "dim"))
+	}
 	fmt.Fprintln(w)
 
 	var ctxParts []string
@@ -91,6 +107,32 @@ func preparedUpdateFull(w io.Writer, c *model.PreparedComparison, color Color, h
 	fmt.Fprintf(w, "  shape:     %s\n", operationShapeSummary(firstCommand, haveCommand, firstRoot, haveRoot, color))
 	fmt.Fprintln(w)
 
+	if c.TreeCompared {
+		fmt.Fprintln(w, color.Apply("Event diff", "cyan", "bold"))
+		printEventDiff(w, c.PreparedTree, c.CommittedTree, preparedSides, color)
+		fmt.Fprintln(w)
+	} else {
+		preparedFieldDiff(w, c, color)
+	}
+
+	fmt.Fprintln(w, color.Apply("Context", "cyan", "bold"))
+	fmt.Fprintf(w, "  command id: %s\n", orDash(c.Left.CommandID))
+	if c.Left.PreparedTransactionHash != "" {
+		fmt.Fprintf(w, "  prep hash:  %s\n", Short(c.Left.PreparedTransactionHash, 80))
+	}
+	fmt.Fprintf(w, "  update:     %s\n", Short(orDashValue(c.Right.UpdateID), 80))
+	fmt.Fprintf(w, "  offset:     %s\n", orDash(c.Right.Offset))
+	fmt.Fprintf(w, "  act-as:     %s\n", partyListSummary(c.Left.ActAs))
+	fmt.Fprintf(w, "  read-as:    %s\n", partyListSummary(c.Right.ReadAs))
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, color.Apply("Committed state diff", "cyan", "bold"))
+	PrintCountDiff(w, c.StateDiff, nil, color)
+}
+
+// preparedFieldDiff is the --full diff when only the commands can be compared:
+// each command against the root event at its position.
+func preparedFieldDiff(w io.Writer, c *model.PreparedComparison, color Color) {
 	fmt.Fprintln(w, color.Apply("Field diff", "cyan", "bold"))
 	if len(c.Commands) == 0 && len(c.RootEvents) == 0 {
 		fmt.Fprintln(w, "  no commands")
@@ -114,21 +156,8 @@ func preparedUpdateFull(w io.Writer, c *model.PreparedComparison, color Color, h
 			}
 		}
 	}
+	fmt.Fprintln(w, color.Apply("  child events not compared: "+c.TreeSkipped, "dim"))
 	fmt.Fprintln(w)
-
-	fmt.Fprintln(w, color.Apply("Context", "cyan", "bold"))
-	fmt.Fprintf(w, "  command id: %s\n", orDash(c.Left.CommandID))
-	if c.Left.PreparedTransactionHash != "" {
-		fmt.Fprintf(w, "  prep hash:  %s\n", Short(c.Left.PreparedTransactionHash, 80))
-	}
-	fmt.Fprintf(w, "  update:     %s\n", Short(orDashValue(c.Right.UpdateID), 80))
-	fmt.Fprintf(w, "  offset:     %s\n", orDash(c.Right.Offset))
-	fmt.Fprintf(w, "  act-as:     %s\n", partyListSummary(c.Left.ActAs))
-	fmt.Fprintf(w, "  read-as:    %s\n", partyListSummary(c.Right.ReadAs))
-	fmt.Fprintln(w)
-
-	fmt.Fprintln(w, color.Apply("Committed state diff", "cyan", "bold"))
-	PrintCountDiff(w, c.StateDiff, nil, color)
 }
 
 // preparedUpdateHasDifferences ports prepared_update_has_differences.

@@ -42,6 +42,7 @@ CASES: dict[str, list[str]] = {
         "compare", "--prepared", "examples/transfer.prepared.json",
         "--update", "examples/transfer.trace.json", "--full", "--color", "never",
     ],
+    "open-example-prepared": ["open", "examples/transfer.prepared.json", "--color", "never"],
     "open-example-create": ["open", "examples/create.trace.json", "--color", "never"],
     "open-example-exercise-child-create": ["open", "examples/exercise-child-create.trace.json", "--color", "never"],
     "open-example-archive": ["open", "examples/archive.trace.json", "--color", "never"],
@@ -103,6 +104,28 @@ CASES: dict[str, list[str]] = {
         "--prepared", "tests/fixtures/compare/prepared.json",
         "--update", "tests/fixtures/compare/trace-b.json",
         "--print-json",
+    ],
+
+    # The prepared side decodes into a tree, so a committed child that differs
+    # from the one the participant prepared is reported. update-tampered
+    # changes only the child create's quantity.
+    "compare-prepared-child-match": [
+        "compare",
+        "--prepared", "tests/fixtures/child-diff/prepared.json",
+        "--update", "tests/fixtures/child-diff/update-expected.json",
+        "--color", "never",
+    ],
+    "compare-prepared-child-differs": [
+        "compare",
+        "--prepared", "tests/fixtures/child-diff/prepared.json",
+        "--update", "tests/fixtures/child-diff/update-tampered.json",
+        "--color", "never",
+    ],
+    "compare-prepared-child-differs-full": [
+        "compare",
+        "--prepared", "tests/fixtures/child-diff/prepared.json",
+        "--update", "tests/fixtures/child-diff/update-tampered.json",
+        "--color", "never", "--full",
     ],
 
     # ── compare: update vs update ────────────────────────────────────────────

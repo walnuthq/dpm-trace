@@ -103,7 +103,7 @@ func updateComparisonFull(w io.Writer, c *model.Comparison, color Color) {
 	PrintCountDiff(w, c.LeftCounts, c.RightCounts, color)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, color.Apply("Root events", "cyan", "bold"))
-	printEventDiff(w, c.LeftRoots, c.RightRoots, color)
+	printEventDiff(w, c.LeftRoots, c.RightRoots, updateSides, color)
 	if len(c.TemplatesOnlyInLeft) > 0 || len(c.TemplatesOnlyInRight) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, color.Apply("Template differences", "cyan", "bold"))
@@ -326,8 +326,28 @@ func printEventRowCompact(w io.Writer, lr model.CompareRow, lok bool, rr model.C
 	}
 }
 
+// diffSides names the two sides of a tree diff. The names are padded to the
+// same width so the rows they label stay aligned.
+type diffSides struct{ a, b string }
+
+var (
+	updateSides   = diffSides{"baseline", "candidate"}
+	preparedSides = diffSides{"prepared", "committed"}
+)
+
+func (s diffSides) width() int {
+	if len(s.a) > len(s.b) {
+		return len(s.a)
+	}
+	return len(s.b)
+}
+
+func (s diffSides) label(side, suffix string) string {
+	return fmt.Sprintf("%-*s", s.width()+len(suffix)+1, side+suffix+":")
+}
+
 // printEventDiff ports print_event_diff (the --full root event list).
-func printEventDiff(w io.Writer, left, right []model.CompareRow, color Color) {
+func printEventDiff(w io.Writer, left, right []model.CompareRow, sides diffSides, color Color) {
 	if len(left) == 0 && len(right) == 0 {
 		fmt.Fprintln(w, "  no root events")
 		return
@@ -349,20 +369,20 @@ func printEventDiff(w io.Writer, left, right []model.CompareRow, color Color) {
 				label = "same, children differ"
 			}
 			fmt.Fprintf(w, "  [%d] %-72s %s\n", i, eventRowText(lr), color.Apply(label, "green"))
-			printChildDiff(w, lr.Children, rr.Children, color)
+			printChildDiff(w, lr.Children, rr.Children, sides, color)
 		case lok && rok && compareKey(lr) == compareKey(rr):
 			fmt.Fprintf(w, "  [%d] %-72s %s\n", i, eventRowText(lr), color.Apply("same shape", "yellow"))
 			for _, change := range changedRowFields(lr, rr) {
 				fmt.Fprintf(w, "      %s\n", color.Apply(change, "yellow"))
 			}
-			printChildDiff(w, lr.Children, rr.Children, color)
+			printChildDiff(w, lr.Children, rr.Children, sides, color)
 		case lok && rok:
-			fmt.Fprintf(w, "  [%d] baseline:  %s\n", i, eventRowText(lr))
-			fmt.Fprintf(w, "      candidate: %s\n", eventRowText(rr))
+			fmt.Fprintf(w, "  [%d] %s %s\n", i, sides.label(sides.a, ""), eventRowText(lr))
+			fmt.Fprintf(w, "      %s %s\n", sides.label(sides.b, ""), eventRowText(rr))
 		case lok:
-			fmt.Fprintf(w, "  [%d] baseline only:  %s\n", i, eventRowText(lr))
+			fmt.Fprintf(w, "  [%d] %s %s\n", i, sides.label(sides.a, " only"), eventRowText(lr))
 		case rok:
-			fmt.Fprintf(w, "  [%d] candidate only: %s\n", i, eventRowText(rr))
+			fmt.Fprintf(w, "  [%d] %s %s\n", i, sides.label(sides.b, " only"), eventRowText(rr))
 		}
 	}
 }
@@ -572,7 +592,7 @@ func equalStringSlices(a, b []string) bool {
 
 // printChildDiff walks the subtree below a matched event, so a difference that
 // lives in a child is visible where the parent is reported.
-func printChildDiff(w io.Writer, left, right []model.CompareRow, color Color) {
+func printChildDiff(w io.Writer, left, right []model.CompareRow, sides diffSides, color Color) {
 	n := len(left)
 	if len(right) > n {
 		n = len(right)
@@ -585,14 +605,14 @@ func printChildDiff(w io.Writer, left, right []model.CompareRow, color Color) {
 			for _, change := range changedRowFields(lr, rr) {
 				fmt.Fprintf(w, "      %s %s\n", eventRowText(lr), color.Apply(change, "yellow"))
 			}
-			printChildDiff(w, lr.Children, rr.Children, color)
+			printChildDiff(w, lr.Children, rr.Children, sides, color)
 		case lok && rok:
-			fmt.Fprintf(w, "      baseline:  %s\n", eventRowText(lr))
-			fmt.Fprintf(w, "      candidate: %s\n", eventRowText(rr))
+			fmt.Fprintf(w, "      %s %s\n", sides.label(sides.a, ""), eventRowText(lr))
+			fmt.Fprintf(w, "      %s %s\n", sides.label(sides.b, ""), eventRowText(rr))
 		case lok:
-			fmt.Fprintf(w, "      %s %s\n", eventRowText(lr), color.Apply("baseline only", "yellow"))
+			fmt.Fprintf(w, "      %s %s\n", eventRowText(lr), color.Apply(sides.a+" only", "yellow"))
 		case rok:
-			fmt.Fprintf(w, "      %s %s\n", eventRowText(rr), color.Apply("candidate only", "yellow"))
+			fmt.Fprintf(w, "      %s %s\n", eventRowText(rr), color.Apply(sides.b+" only", "yellow"))
 		}
 	}
 }

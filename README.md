@@ -44,6 +44,14 @@ dpm install 3.5.1                                           # installs an SDK
 
 Otherwise keep using `./dpm-trace`; it is the same binary.
 
+### Requirements
+
+| To | You need |
+| --- | --- |
+| Open committed artifacts, read and compare captured files | the binary only |
+| Trace, prepare and submit against a participant | a reachable JSON Ledger API (Canton 3.x) |
+| Build the example DAR and run a local Canton | DPM with SDK 3.5.1 (`dpm install 3.5.1`) and Java 17 or newer |
+
 ## Usage
 
 An update id identifies a committed transaction on a participant, in the format
@@ -112,8 +120,8 @@ transaction:
 ```bash
 dpm trace submit --submitter <url> --act-as '<party-id>' ...    # commit one, get its id
 dpm trace prepare --submitter <url> --act-as '<party-id>' ...   # compute it without committing
-dpm trace --command-id <command-id>                             # a failed submission
-dpm trace --completion-file completion.json                     # a captured failure
+dpm trace --completion-file failure.json                        # a rejection captured with submit --export
+dpm trace --command-id <command-id>                             # a rejection that reached the ledger
 dpm trace compare a.trace.json b.trace.json                     # what differs
 ```
 
@@ -121,9 +129,43 @@ A failed submission has no update id, so `dpm trace <update-id>` cannot find
 it — completion data is where its outcome lives, and a captured completion file
 reads back with no ledger at all.
 
+Which of the two to use depends on where the submission failed:
+
+| Failure | Example | Completion on the ledger? | Read it with |
+| --- | --- | --- | --- |
+| Before anything is sequenced | a failed `assert`, a contract archived before you submitted (`CONTRACT_NOT_FOUND`), missing authorization, any other interpretation error, a reused command id (`DUPLICATE_COMMAND`) | no | `--completion-file` |
+| After sequencing, during confirmation | contention over the same contract (`LOCAL_VERDICT_LOCKED_CONTRACTS`), a contract archived by a concurrent transaction, a mediator timeout, any other rejection after sequencing | yes | `--command-id` or `--completion-file` |
+
+Most failures you meet while developing are the first kind, so capture the
+rejection when you submit:
+
+```bash
+dpm trace submit --submitter <url> --act-as '<party-id>' ... --export failure.json
+dpm trace --completion-file failure.json
+dpm trace compare --prepared prepared.json --completion-file failure.json
+```
+
+`--command-id` asks the participant's completion stream, so it only finds the
+second kind, but it needs nothing captured: it works for a command your
+application submitted. Two submissions racing for the same contract, for
+example:
+
+```bash
+dpm trace --command-id <command-id> --submitter <url> --act-as '<party-id>'
+#   result:     completion failed
+#   status:     10
+#   message:    LOCAL_VERDICT_LOCKED_CONTRACTS(2,...): Rejected transaction is referring to locked contracts
+dpm trace compare --prepared prepared.json --command-id <command-id> --submitter <url> --act-as '<party-id>'
+```
+
+A command rejected before sequencing has no completion to find. For a reused
+command id, the lookup finds the original submission, not the rejection.
+
 `compare` answers what changed: between what was prepared and what committed,
 between a prepared command and the completion it produced, or between two
-committed transactions. It names every field that moved.
+committed transactions. It names every field that moved, in child events as
+well as in the command itself: the prepared side is the full transaction the
+participant computed, not only the command you sent.
 
 **[docs/commands.md](docs/commands.md)** covers all of it, including
 [what can and cannot be compared](docs/commands.md#what-cannot-be-compared).
@@ -148,8 +190,8 @@ ledger to reach and no Daml toolchain to install.
 
 [`examples/README.md`](examples/README.md) shows how to reproduce the first
 three against a local Canton, and how the same commands work against a remote
-participant. That does need more: a Java runtime, a Canton jar, and a Daml SDK
-to build the example package's DAR. The reassignment pair needs two
+participant. That needs DPM with SDK 3.5.1 and Java 17 or newer (see
+[Requirements](#requirements)). The reassignment pair needs two
 synchronizers, which the shipped config does not set up.
 
 ## Notes

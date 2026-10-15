@@ -49,6 +49,20 @@ jobs:
             echo "built $target"
           done
 
+  example-dar:
+    name: example DAR builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install DPM and the SDK the example pins
+        run: |
+          sdk="$(sed -n 's/^sdk-version: *//p' examples/asset/daml.yaml)"
+          curl -sSL https://get.digitalasset.com/install/install.sh | sh -s "$sdk"
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+      - name: Build examples/asset
+        run: cd examples/asset && dpm build
+
   lit:
     name: lit
     runs-on: ubuntu-latest

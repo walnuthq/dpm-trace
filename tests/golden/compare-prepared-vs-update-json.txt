@@ -20,7 +20,8 @@ $ dpm trace compare --prepared tests/fixtures/compare/prepared.json --update tes
     ],
     "notes": [
       "Prepared data is not committed.",
-      "The comparison checks visible command/event shape; it is not proof of semantic equivalence."
+      "The comparison checks visible command/event shape; it is not proof of semantic equivalence.",
+      "Child events were not compared: the prepared artifact carries no preparedTransaction."
     ],
     "rootEvents": [
       {
@@ -86,6 +87,10 @@ $ dpm trace compare --prepared tests/fixtures/compare/prepared.json --update tes
       "exercise": 1,
       "other": 0,
       "unassign": 0
+    },
+    "tree": {
+      "compared": false,
+      "reason": "the prepared artifact carries no preparedTransaction"
     }
   },
   "kind": "prepared-vs-update",

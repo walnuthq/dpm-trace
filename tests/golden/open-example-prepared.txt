@@ -1,0 +1,32 @@
+$ dpm trace open examples/transfer.prepared.json --color never
+--- exit: 0
+--- stdout:
+Prepared command
+  schema:       dpm-trace/prepared-artifact/v0
+  endpoint:     http://127.0.0.1:6113/v2/interactive-submission/prepare
+  committed:    no
+  command id:   dpm-trace-<id>
+  act-as:       Alice::122036f58f09b1879fdc99a950478166fd73076d1aab38de51f9aec4282dc17213a4
+  read-as:      Bob::1220bc0a0061582e9c8b49216c664d89319f440129fd8b2b0304ddcdd5e7f98dd640
+  commands:     1
+  prepared hash:FtItr2nW1XjyV+FNOyU16Wib3D1ccZrWewE42KtyBwE=
+  hashing:      HASHING_SCHEME_VERSION_V2
+  cost:         0 traffic (request 0, response 0)
+
+Commands
+  [0] exercise Asset:Asset:Transfer on 0059f0a...  newOwner=Bob::1220bc0a0061582e9c8b49216c664d89319f440129fd8b2b0304ddcdd5e7f98dd640
+
+Transaction (as the participant would commit it)
+  └── [0] EXERCISE Asset:Asset.Transfer
+      ├── contract: 0059f0a55ba182af89abbf3213b2df6bbdeaba0409a9d41080573864051d7e5...
+      ├── consuming: true
+      ├── actors: Alice
+      ├── argument: { newOwner: Bob }
+      ├── result: 006735a2d9b35ffbaf26328c528d4e30574c6a27788b8d492ef3ae2ac1b4acce6e
+      └── [1] CREATE Asset:Asset
+          ├── contract: 006735a2d9b35ffbaf26328c528d4e30574c6a27788b8d492ef3ae2ac1b4acce6e
+          ├── signatories: Issuer
+          ├── observers: Bob
+          └── payload: { issuer: Issuer, owner: Bob, name: SILVER, quantity: 100 }
+
+This is prepared transaction data from a non-committing prepare call.

@@ -59,7 +59,7 @@ func Init(w io.Writer, opts Options) (Result, error) {
 
 	data := fields{
 		PackageName:   fieldOr(damlYAML, "name", "app"),
-		SDKVersion:    fieldOr(damlYAML, "sdk-version", "3.4.11"),
+		SDKVersion:    fieldOr(damlYAML, "sdk-version", "3.5.1"),
 		ITestsDir:     orDefault(opts.ITestsDir, "itests"),
 		UnitTestsDir:  orDefault(opts.UnitTestsDir, "unittests"),
 		WithUnittests: !opts.NoUnittests,

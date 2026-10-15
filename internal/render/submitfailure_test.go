@@ -25,7 +25,7 @@ func TestSubmitFailureRendersTheRejection(t *testing.T) {
 	c := loadCompletion(t, "tests/fixtures/compare/completion-fail.json")
 
 	var buf bytes.Buffer
-	SubmitFailure(&buf, c, nil, plain(), source.NewIndex(), 5)
+	SubmitFailure(&buf, c, nil, "", plain(), source.NewIndex(), 5)
 	out := buf.String()
 
 	if !strings.Contains(out, "submission failed") {
@@ -55,13 +55,49 @@ func TestSubmitFailureShowsTheCommand(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	SubmitFailure(&buf, c, request, plain(), source.NewIndex(), 5)
+	SubmitFailure(&buf, c, request, "", plain(), source.NewIndex(), 5)
 	out := buf.String()
 
 	for _, want := range []string{"exercise", "Asset:Asset", "Transfer", "newOwner="} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+// An interpretation failure has no completion, so the next step must read the
+// captured rejection rather than look the command id up.
+func TestSubmitFailureNextStepReadsTheCapturedRejection(t *testing.T) {
+	c := loadCompletion(t, "examples/failed-withdraw.completion.json")
+
+	cases := []struct {
+		name       string
+		exportPath string
+		want       []string
+	}{
+		{"exported", "failure.json", []string{
+			"dpm trace compare --prepared <prepared.json> --completion-file failure.json",
+		}},
+		{"not exported", "", []string{
+			"rerun with --export <file>",
+			"dpm trace compare --prepared <prepared.json> --completion-file <file>",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			SubmitFailure(&buf, c, nil, tc.exportPath, plain(), source.NewIndex(), 5)
+			out := buf.String()
+
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("missing %q in:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "--command-id") {
+				t.Errorf("suggests a --command-id lookup that finds nothing:\n%s", out)
+			}
+		})
 	}
 }
 

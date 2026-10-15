@@ -92,15 +92,24 @@ func CommandCompareRow(command *Object) CommandRow {
 
 // PreparedComparison is the result of comparing a prepared command to a
 // committed update.
+//
+// When the artifact's prepared transaction decodes, PreparedTree and
+// CommittedTree hold both sides as event trees, children included, and
+// TreeCompared is set. Otherwise only the commands can be compared against the
+// root events, and TreeSkipped says why.
 type PreparedComparison struct {
-	Kind        string
-	Left        PreparedSummary
-	Right       TraceSummary
-	Commands    []CommandRow
-	RootEvents  []CompareRow
-	StateDiff   map[string]int
-	PreparedLen int
-	RootLen     int
+	Kind          string
+	Left          PreparedSummary
+	Right         TraceSummary
+	Commands      []CommandRow
+	RootEvents    []CompareRow
+	StateDiff     map[string]int
+	PreparedLen   int
+	RootLen       int
+	TreeCompared  bool
+	TreeSkipped   string
+	PreparedTree  []CompareRow
+	CommittedTree []CompareRow
 }
 
 // ComparePreparedToTrace ports compare_prepared_to_trace.
@@ -126,7 +135,7 @@ func ComparePreparedToTrace(prepared *Object, trace *Trace) *PreparedComparison 
 		}
 	}
 
-	return &PreparedComparison{
+	comparison := &PreparedComparison{
 		Kind:        KindPreparedVsUpdate,
 		Left:        SummarizePrepared(prepared),
 		Right:       SummarizeTrace(trace),
@@ -136,6 +145,106 @@ func ComparePreparedToTrace(prepared *Object, trace *Trace) *PreparedComparison 
 		PreparedLen: len(rawCommands),
 		RootLen:     len(roots),
 	}
+
+	tx, err := PreparedTransactionOf(prepared)
+	if err != nil {
+		comparison.TreeSkipped = err.Error()
+		return comparison
+	}
+	readAs := trace.Projection.ReadAs
+	comparison.TreeCompared = true
+	comparison.PreparedTree = comparableTree(tx.Trace(readAs), len(readAs) > 0)
+	comparison.CommittedTree = comparableTree(trace, len(readAs) > 0)
+	return comparison
+}
+
+// comparableTree shapes a trace's event tree for a prepared-vs-committed diff.
+//
+// A contract the transaction creates gets a different id each time the command
+// is interpreted, and a prepared transaction's ids are not yet suffixed, so the
+// two sides can never agree on one. Each created id, wherever it appears, is
+// replaced by its position: the first contract the transaction creates is
+// "<created #1>" on both sides. Party lists are sorted, since the Ledger API
+// does not promise an order, and witnesses are dropped when there are no read-as
+// parties to derive them from.
+func comparableTree(trace *Trace, keepWitnesses bool) []CompareRow {
+	created := map[string]string{}
+	var number func(ids []string)
+	number = func(ids []string) {
+		for _, id := range ids {
+			ev, ok := trace.EventsByID[id]
+			if !ok {
+				continue
+			}
+			if ev.Kind == KindCreate && ev.ContractID != "" {
+				if _, seen := created[ev.ContractID]; !seen {
+					created[ev.ContractID] = fmt.Sprintf("<created #%d>", len(created)+1)
+				}
+			}
+			number(ev.ChildEventIDs)
+		}
+	}
+	number(trace.RootEventIDs)
+
+	events := make(map[string]*Event, len(trace.EventsByID))
+	for id, ev := range trace.EventsByID {
+		copied := *ev
+		if token, ok := created[ev.ContractID]; ok {
+			copied.ContractID = token
+		}
+		copied.Payload = replaceCreatedIDs(ev.Payload, created)
+		copied.Argument = replaceCreatedIDs(ev.Argument, created)
+		copied.Result = replaceCreatedIDs(ev.Result, created)
+		copied.Signatories = sortedCopy(ev.Signatories)
+		copied.Observers = sortedCopy(ev.Observers)
+		copied.ActingParties = sortedCopy(ev.ActingParties)
+		copied.Witnesses = nil
+		if keepWitnesses {
+			copied.Witnesses = sortedCopy(ev.Witnesses)
+		}
+		events[id] = &copied
+	}
+
+	rows := []CompareRow{}
+	for _, id := range trace.RootEventIDs {
+		if ev, ok := events[id]; ok {
+			rows = append(rows, EventCompareRow(ev, events))
+		}
+	}
+	return rows
+}
+
+func replaceCreatedIDs(value any, created map[string]string) any {
+	switch v := value.(type) {
+	case string:
+		if token, ok := created[v]; ok {
+			return token
+		}
+		return v
+	case *Object:
+		out := NewObject()
+		for _, key := range v.Keys() {
+			item, _ := v.Get(key)
+			out.Set(key, replaceCreatedIDs(item, created))
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = replaceCreatedIDs(item, created)
+		}
+		return out
+	}
+	return value
+}
+
+func sortedCopy(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := append([]string{}, values...)
+	sortStrings(out)
+	return out
 }
 
 // JSON renders the comparison for --print-json.
@@ -156,12 +265,32 @@ func (c *PreparedComparison) JSON() map[string]any {
 			"rootEvents": rowsJSON(c.RootEvents),
 			"commands":   commands,
 			"stateDiff":  intMap(c.StateDiff),
-			"notes": []string{
-				"Prepared data is not committed.",
-				"The comparison checks visible command/event shape; it is not proof of semantic equivalence.",
-			},
+			"tree":       c.treeJSON(),
+			"notes":      c.notes(),
 		},
 	}
+}
+
+func (c *PreparedComparison) treeJSON() map[string]any {
+	if !c.TreeCompared {
+		return map[string]any{"compared": false, "reason": c.TreeSkipped}
+	}
+	return map[string]any{
+		"compared":  true,
+		"prepared":  rowsJSON(c.PreparedTree),
+		"committed": rowsJSON(c.CommittedTree),
+	}
+}
+
+func (c *PreparedComparison) notes() []string {
+	notes := []string{
+		"Prepared data is not committed.",
+		"The comparison checks visible command/event shape; it is not proof of semantic equivalence.",
+	}
+	if c.TreeCompared {
+		return append(notes, "Contracts the transaction creates are compared by position, since their ids differ between interpretations.")
+	}
+	return append(notes, "Child events were not compared: "+c.TreeSkipped+".")
 }
 
 func (s PreparedSummary) json() map[string]any {
