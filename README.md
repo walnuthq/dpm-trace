@@ -11,7 +11,30 @@ and payloads that participant can see.
 
 ## Install
 
-Download the archive for your platform from
+On macOS or Linux, install the latest release and register it with every
+installed Daml SDK, so `dpm trace` works in any project:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/walnuthq/dpm-trace/main/install.sh | sh
+```
+
+It verifies the archive against `checksums.txt` and installs to `~/.local/bin`.
+Set `VERSION=0.1.4`, `INSTALL_DIR=<dir>` or `NO_REGISTER=1` to change that.
+
+If your project lists DPM components instead of setting `sdk-version`, add
+dpm-trace to that list:
+
+```yaml
+components:
+  - damlc:<sdk-version>
+  - daml-script:<sdk-version>
+  - oci://ghcr.io/walnuthq/dpm-trace:<version>
+```
+
+Then run `dpm install package`. A project cannot have both `sdk-version` and
+`components`.
+
+Or download the archive for your platform from
 [Releases](https://github.com/walnuthq/dpm-trace/releases) and unpack it. The
 binary is self-contained — no runtime, no dependencies:
 
