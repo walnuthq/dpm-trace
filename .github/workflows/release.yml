@@ -16,6 +16,8 @@ on:
 
 permissions:
   contents: write
+  # Pushes the DPM component to ghcr.io/walnuthq/dpm-trace.
+  packages: write
 
 jobs:
   goreleaser:
@@ -66,3 +68,33 @@ jobs:
           "$RUNNER_TEMP/dpm-trace" --version
           test -s "$RUNNER_TEMP/examples/asset/.daml/dist/asset-1.0.0.dar"
           test -x "$RUNNER_TEMP/examples/up.sh"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same binaries as the archives, as a DPM component for projects that opt
+      # in with `components: [oci://ghcr.io/walnuthq/dpm-trace:<version>]`. Windows is
+      # left out: component.yaml points at bin/dpm-trace, which has no .exe suffix.
+      # This publishes right away, even though the GitHub release is still a draft.
+      - name: Publish the DPM component
+        run: |
+          version="$(jq -r .version dist/metadata.json)"
+          platforms=""
+          for p in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${p%/*}"; arch="${p#*/}"
+            bin="$(jq -r --arg os "$os" --arg arch "$arch" \
+              '.[] | select(.type == "Binary" and .goos == $os and .goarch == $arch) | .path' \
+              dist/artifacts.json)"
+            dir="$RUNNER_TEMP/component/$os-$arch"
+            mkdir -p "$dir/bin"
+            cp "$bin" "$dir/bin/dpm-trace"
+            cp component.yaml LICENSE "$dir/"
+            platforms="$platforms -p $p=$dir"
+          done
+          # image.source links the GHCR package to this repo.
+          dpm publish component "oci://ghcr.io/walnuthq/dpm-trace:$version" -g \
+            -a org.opencontainers.image.source=https://github.com/walnuthq/dpm-trace \
+            $platforms
