@@ -51,7 +51,8 @@ jobs:
           echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
 
       - name: Build the example DAR
-        run: cd examples/asset && dpm build
+        # install fetches the git-pinned Splice DARs; dpm build does not.
+        run: cd examples/asset && dpm install package && dpm build
 
       - uses: goreleaser/goreleaser-action@v6
         with:

@@ -12,6 +12,7 @@ module Test where
 import Daml.Script
 import DA.Assert ((===))
 import Asset
+import Splice.Api.Token.HoldingV1 (Holding)
 
 -- | Allocate the standard cast used by every test.
 setup : Script (Party, Party, Party)
@@ -112,3 +113,12 @@ testDuplicateKey = do
     exerciseCmd registryCid IssueAsset with owner = alice, name = "GOLD", quantity = 100
   submitMustFail issuer do
     exerciseCmd registryCid2 IssueAsset with owner = alice, name = "GOLD", quantity = 50
+
+-- The asset is visible through the Splice Token Standard Holding interface.
+testAssetIsHolding : Script ()
+testAssetIsHolding = do
+  issuer <- allocateParty "HoldingIssuer"
+  alice <- allocateParty "HoldingAlice"
+  cid <- submit issuer do createCmd Asset with issuer; owner = alice; name = "GOLD"; quantity = 5
+  Some v <- queryInterfaceContractId alice (toInterfaceContractId @Holding cid)
+  v.amount === 5.0

@@ -69,7 +69,7 @@ if [ "${NO_REGISTER:-}" = 1 ]; then
 	echo "Skipped DPM registration (NO_REGISTER=1)."
 elif ! ls "$DPM_HOME"/cache/sdk/open-source/*.yaml >/dev/null 2>&1; then
 	echo "No Daml SDK in $DPM_HOME, so \`dpm trace\` is not registered yet."
-	echo "Install one (dpm install 3.5.1), then run: dpm-trace install-plugin"
+	echo "Install one (dpm install 3.7.1), then run: dpm-trace install-plugin"
 else
 	for manifest in "$DPM_HOME"/cache/sdk/open-source/*.yaml; do
 		sdk=$(basename "$manifest" .yaml)
