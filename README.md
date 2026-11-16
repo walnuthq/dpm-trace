@@ -232,7 +232,8 @@ go test ./...
 
 `lit` and `FileCheck` come from pip: `pip install lit filecheck`.
 
-[AGENTS.md](AGENTS.md) describes the code layout and contribution rules;
+[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the full test run and pull
+request rules; [AGENTS.md](AGENTS.md) describes the code layout;
 [docs/](docs) holds the rest of the documentation.
 
 ## License
