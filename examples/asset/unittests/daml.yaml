@@ -1,4 +1,4 @@
-sdk-version: 3.5.1
+sdk-version: 3.7.1
 name: asset-unittests
 source: daml
 version: 1.0.0
@@ -10,3 +10,4 @@ dependencies:
 # daml-script. Build it first with `dpm build --all`.
 data-dependencies:
   - ../.daml/dist/asset-1.0.0.dar
+  - "git:github.com/canton-network/splice#a412530c82570bccab384052638a08fdbf3ad6e4?path=daml/dars/splice-api-token-holding-v1-1.0.0.dar"

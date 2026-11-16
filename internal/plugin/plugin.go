@@ -74,7 +74,7 @@ func Install(w io.Writer, opts Options) error {
 	}
 	if sdkVersion == "" {
 		return fmt.Errorf(
-			"no Daml SDK is installed in %s\nInstall one first (e.g. `dpm install 3.5.1`), then run install-plugin again.\nThe binary also works standalone as ./dpm-trace, with no registration",
+			"no Daml SDK is installed in %s\nInstall one first (e.g. `dpm install 3.7.1`), then run install-plugin again.\nThe binary also works standalone as ./dpm-trace, with no registration",
 			home)
 	}
 

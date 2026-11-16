@@ -7,7 +7,7 @@ Do not commit concrete local values from your workspace.
 
 - DPM, which brings both the Canton jar and the Daml toolchain. Install it with
   `curl https://get.digitalasset.com/install/install.sh | sh`, then
-  `dpm install 3.5.1`.
+  `dpm install 3.7.1`.
 - Java 17 or newer, to run Canton.
 
 ## Boot

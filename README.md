@@ -62,7 +62,7 @@ Registration requires DPM with a Daml SDK installed. If you have neither:
 
 ```bash
 curl https://get.digitalasset.com/install/install.sh | sh   # installs dpm
-dpm install 3.5.1                                           # installs an SDK
+dpm install 3.7.1                                           # installs an SDK
 ```
 
 Otherwise keep using `./dpm-trace`; it is the same binary.
@@ -73,7 +73,7 @@ Otherwise keep using `./dpm-trace`; it is the same binary.
 | --- | --- |
 | Open committed artifacts, read and compare captured files | the binary only |
 | Trace, prepare and submit against a participant | a reachable JSON Ledger API (Canton 3.x) |
-| Build the example DAR and run a local Canton | DPM (tested with 1.0.21) with SDK 3.5.1 (`dpm install 3.5.1`) and Java 17 or newer |
+| Build the example DAR and run a local Canton | DPM 1.1 or newer with SDK 3.7.1 (`dpm install 3.7.1`), Java 17 or newer, and access to github.com the first time (the example pulls Splice DARs from Git) |
 
 ## Usage
 
@@ -213,7 +213,7 @@ ledger to reach and no Daml toolchain to install.
 
 [`examples/README.md`](examples/README.md) shows how to reproduce the first
 three against a local Canton, and how the same commands work against a remote
-participant. That needs DPM with SDK 3.5.1 and Java 17 or newer (see
+participant. That needs DPM with SDK 3.7.1 and Java 17 or newer (see
 [Requirements](#requirements)). The reassignment pair needs two
 synchronizers, which the shipped config does not set up.
 

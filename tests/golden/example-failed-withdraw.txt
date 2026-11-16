@@ -21,11 +21,11 @@ DPM trace completion
     in exercise command b9e9e043:Asset:Asset:Withdraw on contract 0059f0a55b.
 
 Source diagnostics
-  <root>/examples/asset/daml/Asset.daml:54:20
+  <root>/examples/asset/daml/Asset.daml:67:20
   basis: local source
-    52 |       controller owner
-    53 |       do
-  > 54 |         assertMsg "Insufficient balance" (quantity >= amount)
+    65 |       controller owner
+    66 |       do
+  > 67 |         assertMsg "Insufficient balance" (quantity >= amount)
                             ^
-    55 |         create this with quantity = quantity - amount
-    56 | 
+    68 |         create this with quantity = quantity - amount
+    69 | 

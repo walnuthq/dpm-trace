@@ -113,7 +113,7 @@ up() {
   if [[ ! -f "$DAR" ]]; then
     command -v dpm >/dev/null 2>&1 || die "the example DAR is missing and dpm is not on PATH to build it"
     echo "building the example DAR ..." >&2
-    (cd "$HERE/asset" && dpm build >/dev/null)
+    (cd "$HERE/asset" && dpm install package >/dev/null && dpm build >/dev/null)
   fi
 
   mkdir -p "$STATE"

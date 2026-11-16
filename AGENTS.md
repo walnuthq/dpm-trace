@@ -50,10 +50,14 @@ A worked example package for the test runner (Asset contract, Script tests in
 a separate `unittests/` package, `itests/`, CI workflow, regression demo) lives
 in the sibling `daml-contracts` directory; `examples/asset` in this repo is a
 copy kept in sync by `tests/check-examples-sync.py`. The Script tests depend on
-the asset DAR, so build with `dpm build --all` before running them.
+the asset DAR, so build with `dpm build --all` before running them. Both
+packages pull Splice DARs as `git:` dependencies, which `dpm build` does not
+fetch: run `dpm install package` in `examples/asset` and in its `unittests/`
+first.
 
 ## Development Rules
 
+- Keep the docs in step. The user docs live in a separate repo, [walnuthq/docs](https://github.com/walnuthq/docs) (`docs-canton/`). Any change to a version (SDK, DPM, Canton), a command, flag, exit code or output format, the install steps, or `examples/asset` (sources, test names and counts, line numbers shown in output) needs a check of those pages, and the same update there when they show it. Re-run the commands a page shows and copy the new output rather than editing it by hand.
 - Keep examples generic. Do not commit local machine paths, usernames, hostnames, or personal temp paths. Use placeholders such as `<path-to-daml-project>`, `<path-to-canton.jar>`, `<package-dir>`, and `<party-id>`.
 - Do not commit `.venv/`, `.dpm-home/`, `.dpm-trace.json`, `tests/.lit/`, or generated caches.
 - Stdlib only: `go.mod` stays free of requires. The test drivers under `tests/` are Python and must run on a clean Python 3.10+ with no pip installs beyond `lit` and `filecheck`.

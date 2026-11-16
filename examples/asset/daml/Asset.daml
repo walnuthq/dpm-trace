@@ -1,6 +1,10 @@
 -- Copyright (c) 2026 Walnut. Apache-2.0.
 module Asset where
 
+import DA.TextMap qualified as TextMap
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.MetadataV1
+
 -- | A simple issued asset (IOU-style).
 --
 -- The issuer guarantees the asset; the owner holds it. The owner can transfer
@@ -45,6 +49,15 @@ template Asset
       controller owner
       do
         pure ()
+
+    -- Token Standard wallets can read an Asset as a Holding.
+    interface instance Holding for Asset where
+      view = HoldingView with
+        owner
+        instrumentId = InstrumentId with admin = issuer; id = name
+        amount = intToDecimal quantity
+        lock = None
+        meta = Metadata with values = TextMap.empty
 
     -- | Withdraw a certain amount from the asset, reducing its quantity.
     choice Withdraw : ContractId Asset

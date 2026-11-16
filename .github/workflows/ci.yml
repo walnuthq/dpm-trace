@@ -61,6 +61,13 @@ jobs:
           curl -sSL https://get.digitalasset.com/install/install.sh | sh -s "$sdk"
           echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
       # --all also compiles the unittests package, so a broken Script test fails here.
+      # dpm build does not fetch git DAR dependencies; install does.
+      - name: Fetch the git-pinned Splice DARs
+        run: |
+          cd examples/asset
+          dpm install package
+          (cd unittests && dpm install package)
+          dpm update --check
       - name: Build examples/asset
         run: cd examples/asset && dpm build --all
 

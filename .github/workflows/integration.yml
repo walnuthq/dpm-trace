@@ -41,6 +41,14 @@ jobs:
           # expanded -- and hardcoding the runner's home is a path leak.
           echo "DPM_TRACE_CANTON_JAR=$HOME/.dpm/cache/components/canton-open-source/$SDK_VERSION/lib/canton-open-source-$SDK_VERSION.jar" >> "$GITHUB_ENV"
 
+      # The integration suite builds daml-contracts, whose git-pinned Splice
+      # DARs dpm build does not fetch on its own.
+      - name: Fetch git DAR dependencies
+        run: |
+          cd daml-contracts
+          dpm install package
+          (cd unittests && dpm install package)
+
       - name: Install lit + FileCheck
         run: |
           # filecheck is a pure-Python FileCheck. The LLVM package pulls ~650MB

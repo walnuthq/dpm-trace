@@ -16,8 +16,10 @@ dpm trace open examples/assign.trace.json
 ```
 
 The Daml package behind the first three is in [`asset/`](asset), and the steps
-below rebuild them from it — nothing outside this repository is required, though
-reproducing them needs DPM with SDK 3.5.1 and Java 17 or newer. Opening the
+below rebuild them from it. Reproducing them needs DPM 1.1 or newer with SDK
+3.7.1, Java 17 or newer, and access to github.com: `Asset` implements the Splice
+Token Standard `Holding` interface, and its `daml.yaml` pulls the Splice DARs
+from Git, pinned to a commit (see [Git DAR dependencies](#git-dar-dependencies)). Opening the
 committed artifacts above needs neither.
 
 ## The shapes
@@ -69,8 +71,8 @@ source examples/up.sh   # sets LEDGER, ISSUER, ALICE, BOB
 
 The same exports are kept in `examples/.env` for other shells.
 
-It uses the shipped DAR (building it with `dpm build` if missing) and the Canton
-3.5.1 jar from the DPM cache, or `$CANTON_JAR`. Canton logs to
+It uses the shipped DAR (building it with `dpm install package` and `dpm build` if missing) and the Canton
+3.7.1 jar from the DPM cache, or `$CANTON_JAR`. Canton logs to
 `examples/.up/canton.log`; stop it with `./examples/up.sh down`.
 
 Beware `.dpm-trace.json`: config discovery walks up from the current directory,
@@ -130,6 +132,8 @@ does not pull in `daml-script`; they depend on that DAR, so build both first:
 
 ```bash
 cd examples/asset
+dpm install package                    # fetches the git-pinned Splice DARs
+(cd unittests && dpm install package)
 dpm build --all
 dpm trace test unittests --files daml/Test.daml \
   --daml-yaml unittests/daml.yaml --daml-yaml daml.yaml \
@@ -163,3 +167,20 @@ Output is always **one participant's projection** — what that participant is
 authorized to see, not a global view of the transaction. A remote participant
 therefore shows you its own projection, which may legitimately contain fewer
 events than your local one.
+
+## Git DAR dependencies
+
+`asset/daml.yaml` and `asset/unittests/daml.yaml` do not vendor the Splice
+Token Standard DARs. They name them as `git:` lines pinned to a commit of
+`canton-network/splice` (DPM 1.1+, SDK 3.6+):
+
+```yaml
+data-dependencies:
+  - "git:github.com/canton-network/splice#<sha>?path=daml/dars/splice-api-token-holding-v1-1.0.0.dar"
+```
+
+`dpm install package` fetches them into `~/.dpm/cache/git`. `dpm build` does not
+fetch them, so run the install first on a fresh machine or CI runner. The first
+fetch clones the Splice repository (a few hundred MB). To move to another
+Splice version, pass the DAR's GitHub URL to `dpm add dar <url>
+--data-dependencies`; it rewrites the line with the new pin.
