@@ -35,7 +35,8 @@ type Options struct {
 }
 
 // Run boots a Canton, deploys the DAR, allocates parties, runs lit against the
-// live node and tears everything down. Ports run_integration_tests.
+// live node and tears everything down.
+// Ports run_integration_tests.
 //
 // The lit exit code is returned unchanged: it is the CI gate.
 func Run(stdout, stderr io.Writer, opts Options) (int, error) {
@@ -47,20 +48,6 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 		return 2, fmt.Errorf("integration test dir not found: %s", testDir)
 	}
 
-	cantonJar := opts.CantonJar
-	if cantonJar == "" {
-		cantonJar = os.Getenv("DPM_TRACE_CANTON_JAR")
-	}
-	if cantonJar != "" {
-		cantonJar, _ = resolve(cantonJar)
-	}
-	if cantonJar == "" {
-		return 2, fmt.Errorf("--canton-jar (or DPM_TRACE_CANTON_JAR) must point at a Canton jar")
-	}
-	if _, err := os.Stat(cantonJar); err != nil {
-		return 2, fmt.Errorf("--canton-jar (or DPM_TRACE_CANTON_JAR) must point at a Canton jar")
-	}
-
 	daml := expandUser(orDefault(opts.Daml, "dpm"))
 	lit := orDefault(opts.Lit, "lit")
 	placements := ParsePlacements(orDefault(opts.Parties, "Alice,Bob"))
@@ -69,6 +56,11 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 	// The suite invokes %dpm. The generated lit.cfg.py reads it from
 	// DPM_TRACE_IT_DPM and fails without it, so point it at this binary.
 	self, err := os.Executable()
+	if err != nil {
+		return 2, err
+	}
+
+	cantonJar, err := resolveCantonJar(opts.CantonJar)
 	if err != nil {
 		return 2, err
 	}
@@ -97,72 +89,11 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 	}()
 	logPath := filepath.Join(work, "canton.log")
 
-	ports, err := FreePorts(3 + 3*participants)
+	participantURLs, partyIDs, stop, err := bootCanton(stdout, opts, work, cantonJar, dar, placements, participants)
 	if err != nil {
 		return 2, err
 	}
-	participantPorts := make([]ParticipantPorts, 0, participants)
-	participantURLs := make([]string, 0, participants)
-	for i := 0; i < participants; i++ {
-		base := 3 + 3*i
-		p := ParticipantPorts{Admin: ports[base], Ledger: ports[base+1], HTTP: ports[base+2]}
-		participantPorts = append(participantPorts, p)
-		participantURLs = append(participantURLs, fmt.Sprintf("http://127.0.0.1:%d", p.HTTP))
-	}
-
-	configPath := filepath.Join(work, "canton.conf")
-	bootstrapPath := filepath.Join(work, "bootstrap.canton")
-	if err := os.WriteFile(configPath, []byte(ConfigText(ports[0], ports[1], ports[2], participantPorts, orDefault(opts.SequencerType, "bft"))), 0o644); err != nil {
-		return 2, err
-	}
-	if err := os.WriteFile(bootstrapPath, []byte(BootstrapText(dar, placements, participants)), 0o644); err != nil {
-		return 2, err
-	}
-
-	endpoints := make([]string, 0, participants)
-	for i, p := range participantPorts {
-		endpoints = append(endpoints, fmt.Sprintf("participant%d :%d", i+1, p.HTTP))
-	}
-	fmt.Fprintf(stdout, "booting local Canton (%s); deploying %s ...\n",
-		strings.Join(endpoints, ", "), filepath.Base(dar))
-
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		return 2, err
-	}
-	canton := exec.Command("java", "-jar", cantonJar, "daemon",
-		"-c", configPath, "--bootstrap", bootstrapPath, "--no-tty")
-	canton.Stdout = logFile
-	canton.Stderr = logFile
-	canton.Dir = work
-	canton.Env = testrunner.ChildEnv(nil)
-	if err := canton.Start(); err != nil {
-		logFile.Close()
-		return 2, err
-	}
-	defer func() {
-		logFile.Close()
-		if canton.Process == nil {
-			return
-		}
-		_ = canton.Process.Signal(syscall.SIGTERM)
-		done := make(chan struct{})
-		go func() { _, _ = canton.Process.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(15 * time.Second):
-			_ = canton.Process.Kill()
-		}
-	}()
-
-	partyURLs := make([]PartyEndpoint, 0, len(placements))
-	for _, placement := range placements {
-		partyURLs = append(partyURLs, PartyEndpoint{Name: placement.Name, LedgerURL: participantURLs[placement.Index-1]})
-	}
-	partyIDs, err := WaitForParties(partyURLs, canton, logPath, opts.CantonTimeout)
-	if err != nil {
-		return 2, err
-	}
+	defer stop()
 
 	names := make([]string, 0, len(partyIDs))
 	for name := range partyIDs {
@@ -224,6 +155,95 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 		}
 	}
 	return code, nil
+}
+
+func resolveCantonJar(flag string) (string, error) {
+	cantonJar := flag
+	if cantonJar == "" {
+		cantonJar = os.Getenv("DPM_TRACE_CANTON_JAR")
+	}
+	if cantonJar != "" {
+		cantonJar, _ = resolve(cantonJar)
+	}
+	if cantonJar == "" {
+		return "", fmt.Errorf("--canton-jar (or DPM_TRACE_CANTON_JAR) must point at a Canton jar")
+	}
+	if _, err := os.Stat(cantonJar); err != nil {
+		return "", fmt.Errorf("--canton-jar (or DPM_TRACE_CANTON_JAR) must point at a Canton jar")
+	}
+	return cantonJar, nil
+}
+
+func bootCanton(stdout io.Writer, opts Options, work, cantonJar, dar string, placements []Placement, participants int) ([]string, map[string]string, func(), error) {
+	logPath := filepath.Join(work, "canton.log")
+	ports, err := FreePorts(3 + 3*participants)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	participantPorts := make([]ParticipantPorts, 0, participants)
+	participantURLs := make([]string, 0, participants)
+	for i := 0; i < participants; i++ {
+		base := 3 + 3*i
+		p := ParticipantPorts{Admin: ports[base], Ledger: ports[base+1], HTTP: ports[base+2]}
+		participantPorts = append(participantPorts, p)
+		participantURLs = append(participantURLs, fmt.Sprintf("http://127.0.0.1:%d", p.HTTP))
+	}
+
+	configPath := filepath.Join(work, "canton.conf")
+	bootstrapPath := filepath.Join(work, "bootstrap.canton")
+	if err := os.WriteFile(configPath, []byte(ConfigText(ports[0], ports[1], ports[2], participantPorts, orDefault(opts.SequencerType, "bft"))), 0o644); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := os.WriteFile(bootstrapPath, []byte(BootstrapText(dar, placements, participants)), 0o644); err != nil {
+		return nil, nil, nil, err
+	}
+
+	endpoints := make([]string, 0, participants)
+	for i, p := range participantPorts {
+		endpoints = append(endpoints, fmt.Sprintf("participant%d :%d", i+1, p.HTTP))
+	}
+	fmt.Fprintf(stdout, "booting local Canton (%s); deploying %s ...\n",
+		strings.Join(endpoints, ", "), filepath.Base(dar))
+
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	canton := exec.Command("java", "-jar", cantonJar, "daemon",
+		"-c", configPath, "--bootstrap", bootstrapPath, "--no-tty")
+	canton.Stdout = logFile
+	canton.Stderr = logFile
+	canton.Dir = work
+	canton.Env = testrunner.ChildEnv(nil)
+	if err := canton.Start(); err != nil {
+		logFile.Close()
+		return nil, nil, nil, err
+	}
+	stop := func() {
+		logFile.Close()
+		if canton.Process == nil {
+			return
+		}
+		_ = canton.Process.Signal(syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() { _, _ = canton.Process.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			_ = canton.Process.Kill()
+		}
+	}
+
+	partyURLs := make([]PartyEndpoint, 0, len(placements))
+	for _, placement := range placements {
+		partyURLs = append(partyURLs, PartyEndpoint{Name: placement.Name, LedgerURL: participantURLs[placement.Index-1]})
+	}
+	partyIDs, err := WaitForParties(partyURLs, canton, logPath, opts.CantonTimeout)
+	if err != nil {
+		stop()
+		return nil, nil, nil, err
+	}
+	return participantURLs, partyIDs, stop, nil
 }
 
 // PartyEndpoint ties a party to the participant that hosts it.
