@@ -1,12 +1,15 @@
 # Example integration test scaffolded by `dpm trace test --init`.
 #
 # Replace the smoke check below with a real submission against your templates.
-# Available substitutions: %dpm, %ledger, %alice, %bob, %dar, %daml-yaml, %damlc, %python.
+# Available substitutions: %dpm, %ledger, %auth, %alice, %bob, %dar, %daml-yaml, %damlc, %python.
+#
+# %auth expands to --token-file <path> when the suite runs against participants given
+# by --ledger-url with --token-file, and to nothing otherwise. %ledger2 pairs with %auth2.
 #
 # Create-and-trace pattern:
-#   # RUN: ID=$(%dpm submit --submitter %ledger --act-as %alice \
+#   # RUN: ID=$(%dpm submit --submitter %ledger %auth --act-as %alice \
 #   # RUN:        --template '#<package-name>:<Module>:<Template>' --arg field=value) \
-#   # RUN:   && %dpm trace "$ID" --submitter %ledger --read-as %alice --color never | FileCheck %s
+#   # RUN:   && %dpm trace "$ID" --submitter %ledger %auth --read-as %alice --color never | FileCheck %s
 #   # CHECK: CREATE <Module>:<Template>
 #
 # Smoke check (passes out of the box; proves %dpm and the harness are wired):

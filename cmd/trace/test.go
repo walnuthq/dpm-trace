@@ -22,7 +22,7 @@ import (
 func runTest(args []string) int {
 	if wantsHelp(args) {
 		commandHelp(os.Stdout, "dpm trace test <package-dir> [flags]",
-			"Run Daml Script unit tests, or lit integration tests against a local Canton, and map failures to source.",
+			"Run Daml Script unit tests, or lit integration tests against a local Canton that dpm trace boots (or persistent participants given by --ledger-url), and map failures to source.",
 			testFlags, "")
 		return 0
 	}
@@ -90,6 +90,11 @@ func runTest(args []string) int {
 			integrationOpts.TestDir = value
 		case "--canton-jar":
 			integrationOpts.CantonJar = value
+			integrationOpts.CantonJarGiven = true
+		case "--ledger-url":
+			integrationOpts.LedgerURLs = append(integrationOpts.LedgerURLs, value)
+		case "--token-file":
+			integrationOpts.TokenFiles = append(integrationOpts.TokenFiles, value)
 		case "--lit":
 			integrationOpts.Lit = value
 		case "--parties":
@@ -141,6 +146,11 @@ func runTest(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", arg)
 			return 2
 		}
+	}
+
+	if integrationOpts.TestDir == "" && (len(integrationOpts.LedgerURLs) > 0 || len(integrationOpts.TokenFiles) > 0) {
+		fmt.Fprintln(os.Stderr, "error: --ledger-url and --token-file apply only with --integration")
+		return 2
 	}
 
 	cfg, err := config.Load(configPath)
@@ -272,23 +282,25 @@ var testFlags = []flagDoc{
 	{"--source-root PATH", "Local Daml source root for diagnostics. Repeatable."},
 	{"--debug-info PATH", "daml-debug-info/v1 file for source positions. Repeatable."},
 	{"--max-source-locations N", "Maximum diagnostics per failure. Defaults to 6."},
-	{"--keep-artifacts", "Keep the temporary run directory."},
+	{"--keep-artifacts", "Keep the temporary run directory. Ignored with --ledger-url."},
 	{"--dar PATH", "Local DAR to verify failures with damlc inspect. Repeatable."},
 	{"--damlc PATH", "dpm, daml or damlc executable for inspection. Defaults to --daml."},
-	{"--integration DIR", "Run the integration tests in DIR against a local Canton that dpm trace starts and stops."},
+	{"--integration DIR", "Run the integration tests in DIR against a local Canton that dpm trace starts and stops, or against persistent participants with --ledger-url."},
 	{"--canton-jar PATH", "Canton JAR to start for --integration. Defaults to $DPM_TRACE_CANTON_JAR."},
 	{"--dar PATH", "With --integration, deploy the first DAR instead of building."},
+	{"--ledger-url URL", "With --integration, attach to an existing participant's JSON Ledger API instead of booting Canton. Repeatable, one per participant: the Nth --ledger-url serves the parties placed with @N in --parties. Cannot be combined with --canton-jar."},
+	{"--token-file PATH", "Requires --ledger-url. Bearer token file, re-read on every request. Repeatable: give none, or exactly one per --ledger-url in the same order."},
 	{"--parties Name@N,...", "Parties to allocate and the participant each is placed on, e.g. Alice@1,Bob@2. Defaults to Alice,Bob."},
 	{"--lit PATH", "lit executable for --integration. Defaults to lit."},
-	{"--sequencer-type TYPE", "Sequencer type of the local Canton. Defaults to bft."},
-	{"--canton-timeout SECONDS", "How long to wait for the local Canton to be ready. Defaults to 180."},
+	{"--sequencer-type TYPE", "Sequencer type of the local Canton. Defaults to bft. Ignored with --ledger-url."},
+	{"--canton-timeout SECONDS", "How long to wait for the local Canton to be ready, or with --ledger-url for each party to become visible on every participant. Defaults to 180."},
 	{"--verbose", "Pass -vv to lit for per-test output."},
 	{"--init", "Scaffold itests/, unittests/ and a CI workflow in the package instead of running tests."},
 	{"--no-unittests", "With --init, skip unittests/."},
 	{"--no-ci", "With --init, skip the CI workflow."},
 	{"--itests-dir DIR", "With --init, the integration test directory. Defaults to itests."},
 	{"--unittests-dir DIR", "With --init, the unit test directory. Defaults to unittests."},
-	{"--config PATH", "Config JSON. Defaults to .dpm-trace.json in this directory or a parent."},
+	{"--config PATH", "Config JSON. Defaults to $DPM_TRACE_CONFIG (the integration runner's override), then .dpm-trace.json in this directory or a parent."},
 	{"--color MODE", "auto, always or never. Defaults to auto."},
 	{"-h, --help", "Show this help."},
 }

@@ -1,45 +1,59 @@
 package integration
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/walnuthq/dpm-trace/internal/config"
 	"github.com/walnuthq/dpm-trace/internal/ledger"
 	"github.com/walnuthq/dpm-trace/internal/model"
 	"github.com/walnuthq/dpm-trace/internal/testrunner"
 )
 
-// Options configure an integration run.
+// Options configure an integration run. LedgerURLs lists one JSON Ledger API
+// URL per participant, in order, and switches the run to attach mode.
+// TokenFiles lists one bearer token file per URL, in the same order, or is empty
+// for participants that need no authentication.
 type Options struct {
-	TestDir       string
-	Root          string
-	Daml          string
-	CantonJar     string
-	Lit           string
-	Parties       string
-	DAR           string
-	SequencerType string
-	CantonTimeout int
-	Verbose       bool
-	KeepArtifacts bool
-	SrcRoot       string // exported to tests as DPM_TRACE_IT_SRC
-	Python        string // exported to tests as DPM_TRACE_IT_PYTHON
+	TestDir        string
+	Root           string
+	Daml           string
+	CantonJar      string
+	LedgerURLs     []string
+	TokenFiles     []string
+	CantonJarGiven bool
+	Lit            string
+	Parties        string
+	DAR            string
+	SequencerType  string
+	CantonTimeout  int
+	Verbose        bool
+	KeepArtifacts  bool
+	SrcRoot        string // exported to tests as DPM_TRACE_IT_SRC
+	Python         string // exported to tests as DPM_TRACE_IT_PYTHON
 }
 
 // Run boots a Canton, deploys the DAR, allocates parties, runs lit against the
-// live node and tears everything down.
+// live node and tears everything down. With LedgerURLs set it attaches to
+// existing participants over the JSON Ledger API instead of booting one.
 // Ports run_integration_tests.
 //
-// The lit exit code is returned unchanged: it is the CI gate.
-func Run(stdout, stderr io.Writer, opts Options) (int, error) {
+// The lit exit code is returned unchanged: it is the CI gate. SIGINT,
+// SIGTERM and SIGHUP received once setup begins, and a write to a closed
+// stdout or stderr, stop lit, revoke any rights granted in attach mode, stop a
+// booted Canton and return 128 plus the signal number (SIGPIPE for the write).
+func Run(stdout, stderr io.Writer, opts Options) (code int, err error) {
 	testDir, err := resolve(opts.TestDir)
 	if err != nil {
 		return 2, err
@@ -51,7 +65,18 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 	daml := expandUser(orDefault(opts.Daml, "dpm"))
 	lit := orDefault(opts.Lit, "lit")
 	placements := ParsePlacements(orDefault(opts.Parties, "Alice,Bob"))
+	if err := RejectReservedPartyNames(placements); err != nil {
+		return 2, err
+	}
 	participants := MaxParticipant(placements)
+	if err := ValidateAttach(opts, participants); err != nil {
+		return 2, err
+	}
+	if len(opts.LedgerURLs) > 0 {
+		if err := CheckSuiteForwardsRunnerConfig(testDir); err != nil {
+			return 2, err
+		}
+	}
 
 	// The suite invokes %dpm. The generated lit.cfg.py reads it from
 	// DPM_TRACE_IT_DPM and fails without it, so point it at this binary.
@@ -60,9 +85,11 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 		return 2, err
 	}
 
-	cantonJar, err := resolveCantonJar(opts.CantonJar)
-	if err != nil {
-		return 2, err
+	cantonJar := ""
+	if len(opts.LedgerURLs) == 0 {
+		if cantonJar, err = resolveCantonJar(opts.CantonJar); err != nil {
+			return 2, err
+		}
 	}
 
 	dar := opts.DAR
@@ -80,20 +107,61 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 	if err != nil {
 		return 2, err
 	}
+	attached := len(opts.LedgerURLs) > 0
 	defer func() {
-		if opts.KeepArtifacts {
+		if opts.KeepArtifacts && !attached {
 			fmt.Fprintf(stdout, "\nkept Canton log + config: %s\n", work)
 			return
 		}
 		os.RemoveAll(work)
 	}()
 	logPath := filepath.Join(work, "canton.log")
+	runnerConfig := ""
+	if attached {
+		runnerConfig = filepath.Join(work, "dpm-trace.json")
+		discovered := config.FindFrom(filepath.Join(testDir, ".lit"))
+		if err := config.WriteWithoutConnection(discovered, runnerConfig); err != nil {
+			return 2, err
+		}
+	}
 
-	participantURLs, partyIDs, stop, err := bootCanton(stdout, opts, work, cantonJar, dar, placements, participants)
-	if err != nil {
+	ctx, interruptedCode, brokenPipe, release := cancelOnInterrupt()
+	defer release()
+	defer func() {
+		if signalCode := interruptedCode(); signalCode != 0 {
+			code, err = signalCode, errors.New("interrupted")
+		}
+	}()
+	litStdout, litStderr := stdout, stderr
+	stdout, stderr = brokenPipeWatcher{stdout, brokenPipe}, brokenPipeWatcher{stderr, brokenPipe}
+	failed := func(err error) (int, error) {
+		if signalCode := interruptedCode(); signalCode != 0 {
+			return signalCode, errors.New("interrupted")
+		}
 		return 2, err
 	}
-	defer stop()
+
+	var (
+		participantURLs []string
+		partyIDs        map[string]string
+		tokenFiles      []string
+		stop            func()
+		grants          *Grants
+	)
+	if len(opts.LedgerURLs) > 0 {
+		participantURLs = opts.LedgerURLs
+		partyIDs, tokenFiles, grants, err = attachParticipants(ctx, stdout, opts, dar, placements)
+		defer grants.Revoke(stderr)
+		if err != nil {
+			return failed(err)
+		}
+		logPath = ""
+	} else {
+		if participantURLs, partyIDs, stop, err = bootCanton(ctx, stdout, opts, work, cantonJar, dar, placements, participants); err != nil {
+			return failed(err)
+		}
+		defer stop()
+	}
 
 	names := make([]string, 0, len(partyIDs))
 	for name := range partyIDs {
@@ -104,7 +172,11 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 	for _, name := range names {
 		ready = append(ready, name+"="+shortParty(partyIDs[name]))
 	}
-	fmt.Fprintln(stdout, "Canton ready: "+strings.Join(ready, ", "))
+	if attached {
+		fmt.Fprintln(stdout, "parties: "+strings.Join(ready, ", "))
+	} else {
+		fmt.Fprintln(stdout, "Canton ready: "+strings.Join(ready, ", "))
+	}
 
 	extra := map[string]string{
 		"DPM_TRACE_IT_LEDGER":    participantURLs[0],
@@ -112,6 +184,9 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 		"DPM_TRACE_IT_DAML":      daml,
 		"DPM_TRACE_IT_DAML_YAML": filepath.Join(opts.Root, "daml.yaml"),
 		"DPM_TRACE_IT_DPM":       self,
+	}
+	if runnerConfig != "" {
+		extra[config.EnvConfig] = runnerConfig
 	}
 	// Only forwarded when supplied, for suites whose own scripts need Python.
 	if opts.Python != "" {
@@ -126,19 +201,27 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 	for name, id := range partyIDs {
 		extra["DPM_TRACE_IT_"+strings.ToUpper(name)] = id
 	}
+	for index, file := range tokenFiles {
+		extra["DPM_TRACE_IT_TOKEN_FILE"+indexSuffix(index+1)] = file
+	}
 
 	fmt.Fprintf(stdout, "running integration suite: %s\n\n", testDir)
 	litFlags := []string{"-v"}
 	if opts.Verbose {
 		litFlags = []string{"-vv"}
 	}
-	litCmd := exec.Command(lit, append([]string{testDir}, litFlags...)...)
-	litCmd.Env = testrunner.ChildEnv(extra)
-	litCmd.Stdout = stdout
-	litCmd.Stderr = stderr
+	litCmd := exec.CommandContext(ctx, lit, append([]string{testDir}, litFlags...)...)
+	runInOwnProcessGroup(litCmd)
+	litCmd.WaitDelay = litShutdownGrace
+	litCmd.Env = litEnvironment(attached, extra)
+	litCmd.Stdout = litStdout
+	litCmd.Stderr = litStderr
 	litErr := litCmd.Run()
+	if signalCode := interruptedCode(); signalCode != 0 {
+		killStragglers(litCmd)
+		return signalCode, errors.New("interrupted")
+	}
 
-	code := 0
 	if litErr != nil {
 		var exit *exec.ExitError
 		if errors.As(litErr, &exit) {
@@ -150,11 +233,58 @@ func Run(stdout, stderr io.Writer, opts Options) (int, error) {
 			fmt.Fprintf(stderr, "error: %v\n", litErr)
 			code = 2
 		}
-		if opts.Verbose {
+		if opts.Verbose && logPath != "" {
 			fmt.Fprintf(stderr, "\n--- Canton log (last 60 lines) ---\n%s\n", ReadTail(logPath, 60))
 		}
 	}
 	return code, nil
+}
+
+func litEnvironment(attached bool, extra map[string]string) []string {
+	return filterEnvironment(testrunner.ChildEnv(extra), extra, attached, runtime.GOOS == "windows")
+}
+
+func filterEnvironment(env []string, extra map[string]string, attached, caseInsensitive bool) []string {
+	canonical := func(key string) string {
+		if caseInsensitive {
+			return strings.ToUpper(key)
+		}
+		return key
+	}
+	supplied := make(map[string]bool, len(extra))
+	for key := range extra {
+		supplied[canonical(key)] = true
+	}
+	kept := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		_, exact := extra[key]
+		if !exact && supplied[canonical(key)] {
+			continue
+		}
+		if !supplied[canonical(key)] && isAmbientVariableToDrop(canonical(key), attached) {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return kept
+}
+
+func isAmbientVariableToDrop(canonicalKey string, attached bool) bool {
+	if strings.HasPrefix(canonicalKey, "DPM_TRACE_IT_TOKEN_FILE") {
+		return true
+	}
+	return attached && (strings.HasPrefix(canonicalKey, "DPM_TRACE_IT_") ||
+		strings.HasPrefix(canonicalKey, "DPM_TRACE_TOKEN") ||
+		canonicalKey == "DPM_TRACE_LEDGER_URL" ||
+		canonicalKey == "DPM_TRACE_SCAN_URL")
+}
+
+func indexSuffix(index int) string {
+	if index == 1 {
+		return ""
+	}
+	return strconv.Itoa(index)
 }
 
 func resolveCantonJar(flag string) (string, error) {
@@ -174,7 +304,34 @@ func resolveCantonJar(flag string) (string, error) {
 	return cantonJar, nil
 }
 
-func bootCanton(stdout io.Writer, opts Options, work, cantonJar, dar string, placements []Placement, participants int) ([]string, map[string]string, func(), error) {
+func attachParticipants(ctx context.Context, stdout io.Writer, opts Options, dar string, placements []Placement) (map[string]string, []string, *Grants, error) {
+	participants := make([]Participant, len(opts.LedgerURLs))
+	var tokenFiles []string
+	for i, ledgerURL := range opts.LedgerURLs {
+		participants[i] = Participant{URL: ledgerURL}
+		if len(opts.TokenFiles) == 0 {
+			continue
+		}
+		tokenFile, err := filepath.Abs(opts.TokenFiles[i])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		participants[i].TokenFile = tokenFile
+		tokenFiles = append(tokenFiles, tokenFile)
+	}
+	darBytes, err := os.ReadFile(dar)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fmt.Fprintf(stdout, "attaching to %s; deploying %s ...\n", strings.Join(opts.LedgerURLs, ", "), filepath.Base(dar))
+	partyIDs, grants, err := Attach(ctx, stdout, participants, darBytes, placements, RunSuffix(), time.Duration(opts.CantonTimeout)*time.Second)
+	if err != nil {
+		return nil, nil, grants, err
+	}
+	return partyIDs, tokenFiles, grants, nil
+}
+
+func bootCanton(ctx context.Context, stdout io.Writer, opts Options, work, cantonJar, dar string, placements []Placement, participants int) ([]string, map[string]string, func(), error) {
 	logPath := filepath.Join(work, "canton.log")
 	ports, err := FreePorts(3 + 3*participants)
 	if err != nil {
@@ -238,7 +395,7 @@ func bootCanton(stdout io.Writer, opts Options, work, cantonJar, dar string, pla
 	for _, placement := range placements {
 		partyURLs = append(partyURLs, PartyEndpoint{Name: placement.Name, LedgerURL: participantURLs[placement.Index-1]})
 	}
-	partyIDs, err := WaitForParties(partyURLs, canton, logPath, opts.CantonTimeout)
+	partyIDs, err := WaitForParties(ctx, partyURLs, canton, logPath, opts.CantonTimeout)
 	if err != nil {
 		stop()
 		return nil, nil, nil, err
@@ -252,9 +409,10 @@ type PartyEndpoint struct {
 	LedgerURL string
 }
 
-// WaitForParties polls until every party is visible on its participant.
+// WaitForParties polls until every party is visible on its participant, the
+// timeout elapses or ctx is cancelled.
 // Ports wait_for_parties.
-func WaitForParties(placements []PartyEndpoint, canton *exec.Cmd, logPath string, timeout int) (map[string]string, error) {
+func WaitForParties(ctx context.Context, placements []PartyEndpoint, canton *exec.Cmd, logPath string, timeout int) (map[string]string, error) {
 	if timeout < 1 {
 		timeout = 1
 	}
@@ -263,6 +421,9 @@ func WaitForParties(placements []PartyEndpoint, canton *exec.Cmd, logPath string
 	lastError := ""
 
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// ProcessState is only populated by Wait, which nothing calls during
 		// polling -- checking it here never fires, so a Canton that died on a
 		// bad jar argument or a port clash used to poll connection-refused for
@@ -290,10 +451,14 @@ func WaitForParties(placements []PartyEndpoint, canton *exec.Cmd, logPath string
 			// The parties exist on the Ledger API, but their topology can take
 			// a moment to become effective on the synchronizer; submitting
 			// before then fails with UNKNOWN_INFORMEES.
-			time.Sleep(3 * time.Second)
+			if err := sleep(ctx, 3*time.Second); err != nil {
+				return nil, err
+			}
 			return found, nil
 		}
-		time.Sleep(time.Second)
+		if err := sleep(ctx, time.Second); err != nil {
+			return nil, err
+		}
 	}
 	return nil, fmt.Errorf("canton did not become ready within %ds (last error: %s)", timeout, lastError)
 }
