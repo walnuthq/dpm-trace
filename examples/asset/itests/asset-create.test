@@ -1,7 +1,7 @@
 # Integration test: issue an Asset on the live participant, then trace the
 # committed transaction and assert its shape.
 #
-# RUN: ID=$(%dpm submit --submitter %ledger --act-as %alice --template '#asset:Asset:Asset' --arg issuer=%alice --arg owner=%alice --arg name=GOLD --arg quantity=100) && %dpm trace "$ID" --submitter %ledger --read-as %alice --color never | FileCheck %s
+# RUN: ID=$(%dpm submit --submitter %ledger %auth --act-as %alice --template '#asset:Asset:Asset' --arg issuer=%alice --arg owner=%alice --arg name=GOLD --arg quantity=100) && %dpm trace "$ID" --submitter %ledger %auth --read-as %alice --color never | FileCheck %s
 
 # CHECK: Canton trace
 # CHECK: CREATE Asset:Asset

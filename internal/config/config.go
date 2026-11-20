@@ -22,6 +22,15 @@ const ConfigFileName = ".dpm-trace.json"
 // subproject, so the walk stops at the nearest directory holding one of these.
 var projectBoundaryMarkers = []string{".git", "daml.yaml", "component.yaml"}
 
+// EnvConfig names the environment variable that pins the config file when no
+// --config is given. It is the integration runner's override: in attach mode
+// the runner points it at a copy of the project config without the keys that
+// choose an endpoint or carry a credential (token, tokenFile, ledgerUrl,
+// scanUrl), so those reach test commands only through the flags a suite passes
+// them. The remaining keys, such as readAs, party and damlYaml, still apply.
+// Like an explicit --config, a pinned file that cannot be read is an error.
+const EnvConfig = "DPM_TRACE_CONFIG"
+
 // Find locates the config for the current directory. An explicit path is
 // honored as-is. Ports find_config.
 func Find(explicit string) string {
@@ -32,7 +41,13 @@ func Find(explicit string) string {
 	if err != nil {
 		return ""
 	}
-	cwd, err = filepath.Abs(cwd)
+	return FindFrom(cwd)
+}
+
+// FindFrom locates the project config as Find does, starting at dir instead of
+// the current directory.
+func FindFrom(dir string) string {
+	cwd, err := filepath.Abs(dir)
 	if err != nil {
 		return ""
 	}
@@ -58,8 +73,12 @@ func Find(explicit string) string {
 }
 
 // Load reads the discovered config. A missing implicit config is not an error;
-// a missing explicit one is. Ports load_config.
+// a missing explicit one is. When no explicit path is given, the path in
+// DPM_TRACE_CONFIG counts as explicit. Ports load_config.
 func Load(explicit string) (*model.Object, error) {
+	if explicit == "" {
+		explicit = os.Getenv(EnvConfig)
+	}
 	path := Find(explicit)
 	if path == "" {
 		return model.NewObject(), nil
@@ -146,4 +165,34 @@ func hasBoundaryMarker(dir string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+var connectionKeys = []string{
+	"token", "tokenFile", "token_file",
+	"ledgerUrl", "ledger_url",
+	"scanUrl", "scan_url",
+}
+
+// WriteWithoutConnection copies the config at src to dst with the keys that
+// choose an endpoint or carry a credential removed. An empty src writes an
+// empty config.
+func WriteWithoutConnection(src, dst string) error {
+	obj := model.NewObject()
+	if src != "" {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		if obj, err = model.Decode(data); err != nil {
+			return fmt.Errorf("invalid JSON config %s: %w", src, err)
+		}
+	}
+	for _, key := range connectionKeys {
+		obj.Delete(key)
+	}
+	data, err := model.Encode(obj)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o600)
 }

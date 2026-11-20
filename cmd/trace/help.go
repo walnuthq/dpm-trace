@@ -58,7 +58,7 @@ var listedCommands = []commandDoc{
 	{"compare", "Compare prepared transactions, updates, or completions."},
 	{"prepare", "Prepare a command without committing it."},
 	{"submit", "Submit a command and print the resulting update id."},
-	{"test", "Run Daml Script tests, or integration tests against a local Canton."},
+	{"test", "Run Daml Script tests, or integration tests against a local Canton or existing participants."},
 	{"install-plugin", "Register this binary as a DPM component."},
 }
 
@@ -114,7 +114,7 @@ var traceFlags = []flagDoc{
 	{"--completion-limit N", "Completions to search. Defaults to 100."},
 	{"--max-source-locations N", "Maximum diagnostics to resolve. Defaults to 5."},
 	{"--explain-apis", "Explain Scan API vs Ledger API."},
-	{"--config PATH", "Config JSON. Defaults to .dpm-trace.json in this directory or a parent."},
+	{"--config PATH", "Config JSON. Defaults to $DPM_TRACE_CONFIG (the integration runner's override), then .dpm-trace.json in this directory or a parent."},
 	{"--color MODE", "auto, always or never. Defaults to auto."},
 	{"-h, --help", "Show this help."},
 }
@@ -148,7 +148,7 @@ var compareFlags = []flagDoc{
 	{"--token TOKEN", "Bearer token for the Ledger JSON API."},
 	{"--token-file PATH", "Bearer token file. Alias of --access-token-file."},
 	{"--dar PATH", "Local DAR. Recorded only; damlc inspect is not ported."},
-	{"--config PATH", "Config JSON. Defaults to .dpm-trace.json in this directory or a parent."},
+	{"--config PATH", "Config JSON. Defaults to $DPM_TRACE_CONFIG (the integration runner's override), then .dpm-trace.json in this directory or a parent."},
 	{"--update PATH", "Committed trace artifact, or an update id, to compare against."},
 	{"--command-id ID", "Look up the completion for a command id on the participant."},
 	{"--completion-file PATH", "Captured completion to compare against."},
@@ -189,7 +189,7 @@ var connectionFlags = []flagDoc{
 	{"--read-as PARTY", "Additional read party. Repeatable. Alias of --party."},
 	{"--token TOKEN", "Bearer token for the Ledger JSON API."},
 	{"--token-file PATH", "Bearer token file. Alias of --access-token-file."},
-	{"--config PATH", "Config JSON. Defaults to .dpm-trace.json in this directory or a parent."},
+	{"--config PATH", "Config JSON. Defaults to $DPM_TRACE_CONFIG (the integration runner's override), then .dpm-trace.json in this directory or a parent."},
 }
 
 var outputFlags = []flagDoc{
