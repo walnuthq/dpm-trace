@@ -146,3 +146,43 @@ func TestStringsPrecedence(t *testing.T) {
 		t.Errorf("alternate key not tried: %v", got)
 	}
 }
+
+func TestPinnedConfigReplacesDiscoveredProjectConfig(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, ".git", "HEAD"), "ref\n")
+	write(t, filepath.Join(root, ConfigFileName), `{"token": "leak", "tokenFile": "/leak", "ledgerUrl": "http://leak"}`)
+	pinned := filepath.Join(t.TempDir(), "pinned.json")
+	write(t, pinned, `{"damlYaml": "daml.yaml"}`)
+	chdir(t, root)
+	t.Setenv(EnvConfig, pinned)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"token", "tokenFile", "ledgerUrl"} {
+		if got := String("", cfg, "", key); got != "" {
+			t.Errorf("%s = %q leaked from the discovered config", key, got)
+		}
+	}
+	if got := String("", cfg, "", "damlYaml"); got != "daml.yaml" {
+		t.Errorf("damlYaml = %q, want the pinned config's value", got)
+	}
+}
+
+func TestPinnedConfigThatCannotBeReadIsAnError(t *testing.T) {
+	t.Setenv(EnvConfig, filepath.Join(t.TempDir(), "absent.json"))
+	if _, err := Load(""); err == nil {
+		t.Error("a missing DPM_TRACE_CONFIG file must be an error")
+	}
+}
+
+func TestExplicitConfigBeatsPinnedConfig(t *testing.T) {
+	explicit := filepath.Join(t.TempDir(), "explicit.json")
+	write(t, explicit, `{"damlYaml": "explicit.yaml"}`)
+	t.Setenv(EnvConfig, filepath.Join(t.TempDir(), "absent.json"))
+	cfg, err := Load(explicit)
+	if err != nil || String("", cfg, "", "damlYaml") != "explicit.yaml" {
+		t.Errorf("cfg=%v err=%v", cfg, err)
+	}
+}

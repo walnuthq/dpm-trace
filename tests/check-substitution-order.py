@@ -27,22 +27,25 @@ import types
 from pathlib import Path
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: check-substitution-order.py <repo-root>", file=sys.stderr)
-        return 2
-    repo_root = Path(sys.argv[1]).resolve()
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from scaffold_output import generated_lit_cfg  # noqa: E402
+def subst(text: str, config) -> str:
+    for key, value in config.substitutions:
+        text = text.replace(key, str(value))
+    return text
 
-    lit_cfg_text = generated_lit_cfg(repo_root)
 
-    saved = {k: os.environ.get(k) for k in (
-        "DPM_TRACE_IT_LEDGER", "DPM_TRACE_IT_LEDGER2", "DPM_TRACE_IT_DAML", "DPM_TRACE_IT_DPM")}
+def load_config(lit_cfg_text: str, repo_root: Path, token_files: dict[str, str], ledger: str = "http://ledger1.example"):
+    names = ["DPM_TRACE_IT_LEDGER", "DPM_TRACE_IT_LEDGER2", "DPM_TRACE_IT_DAML", "DPM_TRACE_IT_DPM",
+             "DPM_TRACE_IT_TOKEN_FILE", "DPM_TRACE_IT_TOKEN_FILE2", "DPM_TRACE_CONFIG"]
+    saved = {name: os.environ.get(name) for name in names}
     try:
-        os.environ["DPM_TRACE_IT_LEDGER"] = "http://ledger1.example"
+        os.environ["DPM_TRACE_IT_LEDGER"] = ledger
         os.environ["DPM_TRACE_IT_LEDGER2"] = "http://ledger2.example"
         os.environ["DPM_TRACE_IT_DAML"] = "daml"
+        os.environ["DPM_TRACE_CONFIG"] = "/stub/empty-config.json"
+        os.environ.pop("DPM_TRACE_IT_TOKEN_FILE", None)
+        os.environ.pop("DPM_TRACE_IT_TOKEN_FILE2", None)
+        for suffix, path in token_files.items():
+            os.environ["DPM_TRACE_IT_TOKEN_FILE" + suffix] = path
         # The generated config now refuses to load without a binary.
         os.environ["DPM_TRACE_IT_DPM"] = "/stub/dpm-trace"
 
@@ -73,6 +76,23 @@ def main() -> int:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+    return config
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: check-substitution-order.py <repo-root>", file=sys.stderr)
+        return 2
+    repo_root = Path(sys.argv[1]).resolve()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from scaffold_output import generated_lit_cfg  # noqa: E402
+
+    lit_cfg_text = generated_lit_cfg(repo_root)
+
+    config = load_config(lit_cfg_text, repo_root, token_files={})
+    attached = load_config(lit_cfg_text, repo_root, token_files={"": "/tokens/one file", "2": "/tokens/two"})
+
+    unsafe = load_config(lit_cfg_text, repo_root, token_files={}, ledger="http://host/a b;touch x")
 
     keys = [key for key, _ in config.substitutions]
     errors: list[str] = []
@@ -92,6 +112,45 @@ def main() -> int:
         errors.append(f"%ledger2 did not resolve to the ledger2 URL: {result!r}")
     if "http://ledger1.example2" in result:
         errors.append(f"%ledger2 was corrupted by the %ledger substitution: {result!r}")
+
+    if "%auth2" not in keys or "%auth" not in keys:
+        errors.append(f"expected %auth and %auth2 substitutions; got {keys}")
+    elif keys.index("%auth2") >= keys.index("%auth"):
+        errors.append(f"%auth2 must be registered before %auth (prefix collision); got order {keys}")
+
+    auth_sample = "%dpm trace --submitter %ledger2 %auth2 && %dpm trace --submitter %ledger %auth"
+    boot_result = subst(auth_sample, config)
+    expected_boot = (
+        "/stub/dpm-trace trace --submitter http://ledger2.example "
+        " && /stub/dpm-trace trace --submitter http://ledger1.example "
+    )
+    if boot_result != expected_boot:
+        errors.append(f"boot mode must expand %auth and %auth2 to nothing: {boot_result!r}")
+    attached_result = subst(auth_sample, attached)
+    expected_attached = (
+        '/stub/dpm-trace trace --submitter http://ledger2.example --token-file "$DPM_TRACE_IT_TOKEN_FILE2"'
+        ' && /stub/dpm-trace trace --submitter http://ledger1.example --token-file "$DPM_TRACE_IT_TOKEN_FILE"'
+    )
+    if attached_result != expected_attached:
+        errors.append(f"attach mode must expand %auth[2] to --token-file flags that read the environment: {attached_result!r}")
+    for name, path in (("DPM_TRACE_IT_TOKEN_FILE", "/tokens/one file"), ("DPM_TRACE_IT_TOKEN_FILE2", "/tokens/two")):
+        if attached.environment.get(name) != path:
+            errors.append(f"{name} must reach the test commands unchanged: {attached.environment}")
+    if any(name.startswith("DPM_TRACE_IT_TOKEN_FILE") for name in config.environment):
+        errors.append(f"boot mode must not export a token file: {config.environment}")
+
+    hostile_path = "/tmp/test-%alice.token"
+    hostile = load_config(lit_cfg_text, repo_root, token_files={"": hostile_path})
+    hostile_result = subst("%auth", hostile)
+    if "%alice" in hostile_result or hostile_path in hostile_result or hostile.environment.get("DPM_TRACE_IT_TOKEN_FILE") != hostile_path:
+        errors.append(f"a token path must travel in the environment, never in the RUN line: {hostile_result!r}, {hostile.environment}")
+
+    quoted_ledger = subst("%ledger", unsafe)
+    if quoted_ledger != "'http://host/a b;touch x'":
+        errors.append(f"%ledger must be shell-quoted when it holds shell metacharacters: {quoted_ledger!r}")
+
+    if config.environment.get("DPM_TRACE_CONFIG") != "/stub/empty-config.json":
+        errors.append(f"DPM_TRACE_CONFIG must reach the test commands: {config.environment}")
 
     if errors:
         print("substitution-order checks FAILED:")

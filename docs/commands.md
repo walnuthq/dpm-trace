@@ -19,6 +19,16 @@ cp .dpm-trace.example.json .dpm-trace.json
 }
 ```
 
+`--config PATH` names the file explicitly. Otherwise `DPM_TRACE_CONFIG` does, then
+the nearest `.dpm-trace.json` up to the project root. Every command's config
+lookup honours `DPM_TRACE_CONFIG`, but only the integration runner sets it, and
+only in attach mode (`test --integration --ledger-url`), so it is not a setting
+for users. There it points at a copy of the project config
+without `token`, `tokenFile`, `ledgerUrl` and `scanUrl`, so those reach test
+commands only through the flags a suite passes them. The other keys, such as
+`readAs`, `party`, `damlYaml` and `sourceRoots`, still apply. Like `--config`, a
+`DPM_TRACE_CONFIG` that cannot be read is an error.
+
 ## trace
 
 Inspect a committed transaction:
@@ -315,3 +325,107 @@ prepared id against the committed one is reported as a difference.
 side.** The JSON Ledger API writes it as `[]`, but the prepared transaction does
 not carry the type that says it is nested, so a field of type
 `Optional (Optional a)` set to `None` is reported as `null → []`.
+
+## test --integration against an existing participant
+
+By default `dpm trace test --integration <dir>` boots its own Canton from
+`--canton-jar`. Pass `--ledger-url` to attach to participants that are already
+running instead. The DAR is uploaded and the parties are allocated over the JSON
+Ledger API, so the token needs participant admin rights. The token's user (read
+from `GET /v2/authenticated-user`) is granted `CanActAs` on the parties placed on
+its participant and `CanReadAs` on the others. Those rights are revoked when the
+run ends; the parties and the DAR stay on the network.
+
+```bash
+dpm trace test --integration itests --parties Alice@1,Bob@2 \
+  --ledger-url http://localhost:<participant1-json-port> --token-file ./token1.txt \
+  --ledger-url http://localhost:<participant2-json-port> --token-file ./token2.txt
+```
+
+- Attach mode is enabled only by `--ledger-url` on the command line, never by
+  `DPM_TRACE_LEDGER_URL` or `.dpm-trace.json`. `--ledger-url` repeats, with one
+  value per participant: the highest `@N` in `--parties`. It must be an http or
+  https URL with a hostname and no `user:password@`; credentials in a URL are
+  rejected, and never echoed, in favour of `--token-file`. A query (`?`) or
+  fragment (`#`) is rejected too, and not echoed, because the API paths are
+  appended to the URL as text. Combining it with
+  `--canton-jar`, even an empty one, is an error; an ambient `DPM_TRACE_CANTON_JAR`
+  is ignored.
+- Tokens come only from `--token-file`, which repeats and pairs with
+  `--ledger-url` by position. Give none for participants that need no token,
+  otherwise exactly one per `--ledger-url`. Without a token file a participant is
+  treated as unauthenticated: it has no user, so no rights are granted or
+  revoked. `--token-file` without `--ledger-url` is an error, and so are an empty
+  or malformed `--ledger-url` and a token file that is unreadable or empty, all
+  reported before the DAR is built.
+- Each party id gets a per-run suffix, so re-runs on a long-lived network do not
+  collide. `DPM_TRACE_IT_<NAME>` still carries the full id.
+- `--canton-timeout` is the time each party has to become visible on every
+  participant, as one deadline that also bounds each request.
+- Token files are re-read on every request, so a refresh loop keeps a suite
+  longer than the token lifetime working. A suite command that outlives its
+  token, such as `trace --wait`, reads the file once when it starts, not again
+  while it waits. Replace a token file by renaming a new file over it, so a
+  request never reads a half-written token.
+- The suite's commands run with the project `.dpm-trace.json` minus its
+  connection keys (`DPM_TRACE_CONFIG`, see Configuration), so a project config
+  can neither supply a token nor an endpoint. Only what `%auth` passes reaches
+  them. The runner also drops every `DPM_TRACE_IT_*`, `DPM_TRACE_TOKEN*`,
+  `DPM_TRACE_LEDGER_URL` and `DPM_TRACE_SCAN_URL` variable it did not set itself
+  from the environment lit receives. In both modes it drops any inherited
+  `DPM_TRACE_IT_TOKEN_FILE*`, so a stale token path can never become a
+  `--token-file` flag. On Windows, where environment names ignore case, these
+  comparisons ignore case and the runner's own value wins over a differently
+  cased duplicate. This needs the suite's `lit.cfg.py` to forward
+  `DPM_TRACE_CONFIG`, as the generated one does. The check is a best-effort
+  guard: it reads the one lit configuration lit would execute, the first that
+  exists of `lit.site.cfg.py`, `lit.site.cfg`, `lit.cfg.py` and `lit.cfg` in the
+  nearest directory that has any, walking up from the test directory, and
+  looks for an uncommented mention of `DPM_TRACE_CONFIG`. It does not run the
+  configuration, so a mention that is never executed, or a forward done by a
+  file the configuration loads, is not understood. A suite whose configuration
+  does not mention it, such as one scaffolded before attach mode, is refused with
+  exit code 2 and the lines to add, before anything is uploaded. So is a
+  test directory with no lit configuration in it or above it, which cannot be
+  isolated. The guard judges only the suite's own configuration, the one it
+  finds from the test directory. lit also loads the configuration of any nested
+  suite below it, and the guard does not read those, so every nested suite with
+  its own lit configuration must forward `DPM_TRACE_CONFIG` too.
+- A party whose upper-cased name would make `DPM_TRACE_IT_<NAME>` one of the
+  variables the runner sets for something else (`LEDGER` or `LEDGER<N>`,
+  `TOKEN_FILE` or `TOKEN_FILE<N>`, `DAR`, `DAML`, `DAML_YAML`, `DPM`, `PYTHON`,
+  `SRC`) is refused with exit code 2 before anything is provisioned, in both modes.
+- The rights granted during setup are revoked when the run ends, including when
+  lit fails or the run receives SIGINT, SIGTERM or SIGHUP (exit code 128 plus the
+  signal number), or when the runner's own output closes, for example under
+  `| head`: when the runner's own write gets EPIPE it cleans up and exits with
+  code 141. If the output closes while lit is running, lit 23.1.6 can hang
+  and the rights stay in place until the run receives a signal; do not pipe a
+  long run into a command that exits early. A grant request already sent is allowed to finish, for up to 30
+  seconds, before the run moves on. If it times out or ends without a usable
+  answer, the participant may still apply it after the revoke has run: the run
+  revokes anyway and prints a warning naming the user, the parties and the
+  participant as possibly still granted, so check them. A bare SIGPIPE, such as one raised
+  by a participant that closes a connection early, is ignored. Further signals
+  during cleanup are ignored, and each revoke request times out after 10
+  seconds. A revoke that gets no 2xx answer prints a warning to stderr naming
+  the user and parties to clean up. SIGKILL cannot be caught, so a killed run
+  leaves its rights behind: revoke them by hand.
+- If a participant already has a package with the same name and version but
+  different content, the run stops and tells you to bump `version` in
+  `daml.yaml` and rebuild, instead of printing Canton's `KNOWN_PACKAGE_VERSION`
+  error.
+- Every token file is exported as `DPM_TRACE_IT_TOKEN_FILE`, then
+  `DPM_TRACE_IT_TOKEN_FILE2`, `DPM_TRACE_IT_TOKEN_FILE3` and so on, beside
+  `DPM_TRACE_IT_LEDGER`, `DPM_TRACE_IT_LEDGER2`, ... The generated `lit.cfg.py`
+  turns the first two into `%auth` and `%auth2`; a suite with more participants
+  adds its own substitutions for the rest. `%ledger` and `%ledger2` are
+  shell-quoted.
+- In the tests, `%auth` expands to `--token-file "$DPM_TRACE_IT_TOKEN_FILE"` for
+  participant 1 and `%auth2` to `--token-file "$DPM_TRACE_IT_TOKEN_FILE2"` for
+  participant 2, or to nothing when no token file was given or the suite runs in
+  boot mode. The path travels in the environment lit gives the test commands,
+  never in the RUN line, so a path that contains text lit substitutes, such as
+  `%alice`, arrives unchanged. Pass it to every command that talks to a
+  participant, next to `--submitter`:
+  `%dpm submit --submitter %ledger2 %auth2 ...`.
