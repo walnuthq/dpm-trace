@@ -55,7 +55,7 @@ jobs:
 
       - name: Boot LocalNet with two validators
         id: localnet
-        uses: peacefulstudio/canton-localnet@742e26f7080491340664e9586e7e96302687cb76 # v0.10.2-1
+        uses: peacefulstudio/canton-localnet@dda1ca7741029e5563330750f9137db133afc775 # v0.10.3-1
         with:
           validators: a b
 
@@ -78,4 +78,4 @@ jobs:
 
       - name: Tear down LocalNet
         if: always() && steps.localnet.outcome != 'skipped'
-        uses: peacefulstudio/canton-localnet/teardown@742e26f7080491340664e9586e7e96302687cb76 # v0.10.2-1
+        uses: peacefulstudio/canton-localnet/teardown@dda1ca7741029e5563330750f9137db133afc775 # v0.10.3-1
