@@ -1,0 +1,83 @@
+name: integration-localnet
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: integration on LocalNet
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check out the Daml package the suite runs against
+        uses: actions/checkout@v4
+        with:
+          repository: walnuthq/daml-contracts
+          path: daml-contracts
+
+      - name: Install DPM and the Daml SDK
+        run: |
+          SDK_VERSION="$(sed -n 's/^sdk-version: *//p' examples/asset/daml.yaml)"
+          curl -sSL https://get.digitalasset.com/install/install.sh | sh -s "$SDK_VERSION"
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch git DAR dependencies
+        run: |
+          cd daml-contracts
+          dpm install package
+          (cd unittests && dpm install package)
+
+      - name: Install lit + FileCheck
+        run: |
+          python3 -m pip install --upgrade pip lit filecheck
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -sf "$(command -v filecheck)" "$RUNNER_TEMP/bin/FileCheck"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Build dpm-trace
+        run: go build -o "$RUNNER_TEMP/dpm-trace" ./cmd/trace
+
+      - name: Boot LocalNet with two validators
+        id: localnet
+        uses: peacefulstudio/canton-localnet@dda1ca7741029e5563330750f9137db133afc775 # v0.10.3-1
+        with:
+          validators: a b
+          timeout: 30m
+          up-timeout: 15m
+
+      - name: Run the integration suite against LocalNet
+        env:
+          TOKEN_DIR: ${{ runner.temp }}/localnet-tokens
+        run: |
+          .github/scripts/localnet-tokens.sh --once "$TOKEN_DIR" 120 a b
+          .github/scripts/localnet-tokens.sh "$TOKEN_DIR" 120 a b &
+          refresher=$!
+          trap 'kill "$refresher" 2>/dev/null || true' EXIT
+
+          cd daml-contracts
+          "$RUNNER_TEMP/dpm-trace" trace test --integration itests/ --daml dpm \
+            --parties Alice@1,Bob@2,Issuer@1 \
+            --ledger-url "$CANTON_LOCALNET_A_VALIDATOR_1_JSON_API_URL" \
+            --ledger-url "$CANTON_LOCALNET_B_VALIDATOR_1_JSON_API_URL" \
+            --token-file "$TOKEN_DIR/a.token" \
+            --token-file "$TOKEN_DIR/b.token"
+
+      - name: Tear down LocalNet
+        if: always() && steps.localnet.outcome != 'skipped'
+        uses: peacefulstudio/canton-localnet/teardown@dda1ca7741029e5563330750f9137db133afc775 # v0.10.3-1
