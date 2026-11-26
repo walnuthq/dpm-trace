@@ -58,6 +58,8 @@ jobs:
         uses: peacefulstudio/canton-localnet@dda1ca7741029e5563330750f9137db133afc775 # v0.10.3-1
         with:
           validators: a b
+          timeout: 30m
+          up-timeout: 15m
 
       - name: Run the integration suite against LocalNet
         env:
